@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Xcode user state / derived data
+**/xcuserdata/
+**/*.xcuserstate
+**/DerivedData/
+build/
+*.dSYM/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/PetCore/.build/
+Packages/PetCore/.swiftpm/
+Package.resolved
+
+# Logs, temp
+*.log
+*.tmp

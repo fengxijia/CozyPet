@@ -1,0 +1,11 @@
+name: "今日工作流"
+steps:
+  - id: check-todo
+    say: "看看今天的待办是什么喵"
+    kind: prompt
+  - id: drink-water
+    say: "记得每天喝2L水捏～"
+    kind: prompt
+  - id: do-fun-thing
+    say: "做点自己喜欢的事！"
+    kind: prompt
