@@ -69,27 +69,42 @@ public struct ClaudeProvider: LLMProvider {
                     ]
                     req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-                    let (bytes, response) = try await session.bytes(for: req)
-                    if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                        var body = ""
-                        for try await line in bytes.lines { body += line + "\n" }
-                        throw LLMError.http(status: http.statusCode, body: body)
-                    }
+                    // -1005 "network connection was lost"：URLSession 复用陈旧连接
+                    // 时常见的瞬态错误，叠加 Clash/Mihomo + SSE 必出。还没吐过内容
+                    // 就静默重试一次；流到一半才挂就放弃，免得用户看到重复字。
+                    var yieldedAny = false
+                    var attempt = 0
+                    while true {
+                        attempt += 1
+                        do {
+                            let (bytes, response) = try await session.bytes(for: req)
+                            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                                var body = ""
+                                for try await line in bytes.lines { body += line + "\n" }
+                                throw LLMError.http(status: http.statusCode, body: body)
+                            }
 
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data:") else { continue }
-                        let payloadStr = line
-                            .dropFirst(5)
-                            .trimmingCharacters(in: .whitespaces)
-                        if payloadStr.isEmpty || payloadStr == "[DONE]" { continue }
-                        guard let data = payloadStr.data(using: .utf8),
-                              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                        else { continue }
-                        if let type = obj["type"] as? String,
-                           type == "content_block_delta",
-                           let delta = obj["delta"] as? [String: Any],
-                           let text = delta["text"] as? String {
-                            continuation.yield(text)
+                            for try await line in bytes.lines {
+                                guard line.hasPrefix("data:") else { continue }
+                                let payloadStr = line
+                                    .dropFirst(5)
+                                    .trimmingCharacters(in: .whitespaces)
+                                if payloadStr.isEmpty || payloadStr == "[DONE]" { continue }
+                                guard let data = payloadStr.data(using: .utf8),
+                                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                                else { continue }
+                                if let type = obj["type"] as? String,
+                                   type == "content_block_delta",
+                                   let delta = obj["delta"] as? [String: Any],
+                                   let text = delta["text"] as? String {
+                                    continuation.yield(text)
+                                    yieldedAny = true
+                                }
+                            }
+                            break
+                        } catch let e as URLError where e.code == .networkConnectionLost
+                            && attempt == 1 && !yieldedAny {
+                            continue
                         }
                     }
                     continuation.finish()

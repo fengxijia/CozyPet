@@ -313,23 +313,31 @@ private struct StepRow: View {
                         .truncationMode(.middle)
                 }
             }
+            // 双击文字区域 → 打开编辑器；按钮自己会拦截单击，不冲突
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { onEdit() }
 
             Spacer()
 
             Button(runLabel) { onRun() }
                 .controlSize(.small)
 
-            Menu {
-                Button("编辑…") { onEdit() }
-                Divider()
-                Button("删除", role: .destructive) { onDelete() }
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.secondary.opacity(0.5))
+                .frame(maxHeight: .infinity, alignment: .center)
+                .help("拖动调整顺序")
+
+            Button {
+                onDelete()
             } label: {
-                Image(systemName: "ellipsis.circle")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "trash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary.opacity(0.6))
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .buttonStyle(.borderless)
+            .frame(maxHeight: .infinity, alignment: .center)
+            .help("删除（双击行可编辑）")
         }
         .padding(.vertical, 4)
     }
@@ -582,7 +590,7 @@ private struct StepEditor: View {
             }
         } else {
             stepID = "step-\(Int(Date().timeIntervalSince1970))"
-            actions = [EditableAction(kind: .app)]
+            actions = []
         }
     }
 
@@ -1031,6 +1039,9 @@ private struct NoteRow: View {
     let onIconChange: (String) -> Void
     let onDelete: () -> Void
 
+    @State private var isEditing = false
+    @FocusState private var focused: Bool
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Menu {
@@ -1051,20 +1062,37 @@ private struct NoteRow: View {
             .padding(.top, 6)
             .help("换个图案")
 
-            TextField("写点鼓励的话…", text: $text, axis: .vertical)
-                .lineLimit(1...4)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(.pink.opacity(0.08))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(.pink.opacity(0.18), lineWidth: 0.5)
-                )
+            Group {
+                if isEditing {
+                    TextField("写点鼓励的话…", text: $text, axis: .vertical)
+                        .lineLimit(1...4)
+                        .textFieldStyle(.plain)
+                        .focused($focused)
+                        .onAppear { focused = true }
+                        .onChange(of: focused) { _, isFocused in
+                            // 失焦即提交：点其他地方就退出编辑态，
+                            // 不靠 onSubmit —— axis: .vertical 下回车是插换行不是提交。
+                            if !isFocused { isEditing = false }
+                        }
+                } else {
+                    Text(text.isEmpty ? "写点鼓励的话…（双击编辑）" : text)
+                        .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { isEditing = true }
+                }
+            }
+            .font(.system(size: 13))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.pink.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(.pink.opacity(0.18), lineWidth: 0.5)
+            )
 
             Image(systemName: "line.3.horizontal")
                 .font(.caption)

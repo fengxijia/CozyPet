@@ -27,7 +27,9 @@ struct PetSpriteView: View {
     }
 
     private var fullBody: some View {
-        VStack(spacing: 4) {
+        // 间距要大于 sprite 最大 scaleEffect 造成的向上视觉溢出（160 × max 1.10 ≈ 8px）
+        // —— scaleEffect 不参与布局，只增加视觉尺寸，留小了会盖住气泡。
+        VStack(spacing: 10) {
             SpeechBubbleView(text: state.bubbleText, visible: state.bubbleVisible)
                 // 收窄一点，少遮后面的字。横向更长的话会自动换行。
                 .frame(maxWidth: 200)
