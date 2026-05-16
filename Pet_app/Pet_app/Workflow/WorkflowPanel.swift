@@ -165,6 +165,13 @@ struct WorkflowPanel: View {
     /// 不挡住后面的工作流面板。生命周期跟随 WorkflowPanel。
     @StateObject private var editorWindow = StepEditorWindow()
 
+    /// 工作流依次朗读时的下一条下标；被打断后保留以便续读，念完整轮归零。
+    @State private var currentStepIndex: Int = 0
+    /// 真正在念工作流（区别于"便签也在用 voice"）。
+    /// 喇叭只看这个，避免便签播报时这边也跟着切图标。
+    @State private var isReadingSteps: Bool = false
+    @State private var ttsAlert: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -180,6 +187,23 @@ struct WorkflowPanel: View {
             footer
         }
         .frame(idealWidth: 540, idealHeight: 600)
+        .alert("提示", isPresented: Binding(
+            get: { ttsAlert != nil },
+            set: { if !$0 { ttsAlert = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(ttsAlert ?? "")
+        }
+        // 增 / 删 / 调顺序后从头读，下标可能错位。改文字不重置，保持续读体验。
+        .onChange(of: store.workflow?.steps.map(\.id) ?? []) { _, _ in
+            currentStepIndex = 0
+        }
+    }
+
+    private var hasSpeakableSteps: Bool {
+        guard let wf = store.workflow else { return false }
+        return wf.steps.contains { ($0.say ?? "").trimmingCharacters(in: .whitespaces).isEmpty == false }
     }
 
     @ViewBuilder
@@ -222,6 +246,17 @@ struct WorkflowPanel: View {
                 }
             }
             Spacer()
+            Button {
+                toggleSpeakSteps()
+            } label: {
+                Image(systemName: isReadingSteps ? "stop.circle.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isReadingSteps ? .pink : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!hasSpeakableSteps && !isReadingSteps)
+            .help(isReadingSteps ? "停止" : "依次念出全部工作流")
+
             Button {
                 editorWindow.show(mode: .create, store: store)
             } label: {
@@ -280,6 +315,43 @@ struct WorkflowPanel: View {
         state.say(say, mood: .cheer)
         if !store.doneIDs.contains(step.id) {
             store.toggle(step.id)
+        }
+    }
+
+    private func toggleSpeakSteps() {
+        if isReadingSteps {
+            // voice.cancel() → state.say 的 onFinish(false) → 我们在那里把 isReadingSteps 设回 false
+            voice.cancel()
+            return
+        }
+        guard SettingsView.makeTTSProvider() != nil else {
+            ttsAlert = "请先到 设置 → 语音 打开「说话时念出来」并填好 ElevenLabs key + Voice ID。"
+            return
+        }
+        guard let steps = store.workflow?.steps, !steps.isEmpty else { return }
+        if currentStepIndex >= steps.count { currentStepIndex = 0 }
+        isReadingSteps = true
+        playStep(at: currentStepIndex)
+    }
+
+    private func playStep(at idx: Int) {
+        guard let steps = store.workflow?.steps, idx < steps.count else {
+            currentStepIndex = 0
+            isReadingSteps = false
+            return
+        }
+        let text = (steps[idx].say ?? "").trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else {
+            playStep(at: idx + 1)
+            return
+        }
+        currentStepIndex = idx
+        state.say(text, mood: state.mood, autoHideAfter: 6) { natural in
+            if !natural {
+                isReadingSteps = false
+                return
+            }
+            playStep(at: idx + 1)
         }
     }
 }
