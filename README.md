@@ -17,7 +17,22 @@
 
 ---
 
-## 跑起来
+## 下载即用（推荐 / Apple Silicon）
+
+1. 去 [Releases](https://github.com/fengxijia/CozyPet/releases) 下载最新的 `CozyPet-vX.Y.Z-macOS-arm64.zip`。
+2. 双击解压，把 `CozyPet.app` 拖到 `/Applications`。
+3. **第一次启动**：因为 App 没经过 Apple 公证，直接双击会被 Gatekeeper 拦。
+   - 在 Finder 里 **右键 → 打开**，弹窗里再点一次「打开」就好（这一步只用做一次）；
+   - 或者去「系统设置 → 隐私与安全性」滚到底，点「仍要打开」。
+4. 菜单栏右上会冒出一只小爪子 🐾，点它开始用。
+
+> 第一次开启 Claude 聊天和 ElevenLabs 语音不需要自己申请 API key —— 默认走作者维护的代理服务，
+> 共享速率限制内随便用。要切换到自己的 key 也可以，进 设置 → 对话 / 语音 改 Base URL 就行。
+> 代理服务端代码在 [`proxy-server/`](./proxy-server/)，自部署说明在它的 README。
+
+---
+
+## 自己 build（开发者）
 
 需要 macOS 14+ 和 Xcode 16+。
 

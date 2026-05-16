@@ -1,0 +1,10 @@
+# Caddy reverse proxy — gives us automatic Let's Encrypt HTTPS in front of the Node process.
+# Replace cozypet-proxy.example.com with your actual domain (must already point to this box).
+# Put this at /etc/caddy/Caddyfile and run:  sudo systemctl reload caddy
+
+cozypet-proxy.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1     # disable buffering so SSE streams arrive live
+    }
+}

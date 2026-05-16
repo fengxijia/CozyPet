@@ -1,0 +1,19 @@
+{
+  "name": "cozypet-proxy",
+  "version": "0.1.0",
+  "description": "Thin proxy: hides Anthropic + ElevenLabs API keys behind a shared client token. Used by CozyPet macOS app so end-users don't need their own keys.",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "morgan": "^1.10.0"
+  }
+}

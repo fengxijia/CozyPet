@@ -52,6 +52,7 @@ enum SettingsKeys {
 
     // TTS（ElevenLabs）
     static let ttsAPIKey = "tts.elevenlabs.api_key"
+    static let ttsBaseURL = "tts.elevenlabs.base_url"
     static let ttsVoiceID = "tts.elevenlabs.voice_id"
     static let ttsModel = "tts.elevenlabs.model"
     static let ttsStability = "tts.elevenlabs.stability"
@@ -63,8 +64,8 @@ struct SettingsView: View {
 
     @AppStorage(SettingsKeys.backend) private var backend: String = LLMBackend.claude.rawValue
 
-    @AppStorage(SettingsKeys.anthropicAPIKey) private var anthropicKey: String = ""
-    @AppStorage(SettingsKeys.anthropicBaseURL) private var anthropicBase: String = "https://api.anthropic.com"
+    @AppStorage(SettingsKeys.anthropicAPIKey) private var anthropicKey: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.clientToken : ""
+    @AppStorage(SettingsKeys.anthropicBaseURL) private var anthropicBase: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.anthropicBaseURL : "https://api.anthropic.com"
     @AppStorage(SettingsKeys.anthropicAuthMode) private var authMode: String = ClaudeAuthMode.apiKey.rawValue
     @AppStorage(SettingsKeys.claudeModel) private var claudeModel: String = "claude-opus-4-7"
 
@@ -74,8 +75,9 @@ struct SettingsView: View {
 
     @AppStorage(SettingsKeys.ttsEnabled) private var ttsEnabled: Bool = false
     @AppStorage(SettingsKeys.ttsBackend) private var ttsBackend: String = TTSBackend.elevenlabs.rawValue
-    @AppStorage(SettingsKeys.ttsAPIKey) private var ttsKey: String = ""
-    @AppStorage(SettingsKeys.ttsVoiceID) private var ttsVoiceID: String = ""
+    @AppStorage(SettingsKeys.ttsAPIKey) private var ttsKey: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.clientToken : ""
+    @AppStorage(SettingsKeys.ttsBaseURL) private var ttsBase: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.elevenlabsBaseURL : "https://api.elevenlabs.io"
+    @AppStorage(SettingsKeys.ttsVoiceID) private var ttsVoiceID: String = ProxyConfig.defaultVoiceID
     @AppStorage(SettingsKeys.ttsModel) private var ttsModel: String = "eleven_multilingual_v2"
     @AppStorage(SettingsKeys.ttsStability) private var ttsStability: Double = 0.5
     @AppStorage(SettingsKeys.ttsSimilarity) private var ttsSimilarity: Double = 0.75
@@ -356,6 +358,9 @@ struct SettingsView: View {
     @ViewBuilder
     private var elevenLabsSection: some View {
         keyField(placeholder: "ELEVENLABS_API_KEY", text: $ttsKey, visible: $showTTSKey)
+        TextField("Base URL", text: $ttsBase)
+            .textFieldStyle(.roundedBorder)
+            .help("官方：https://api.elevenlabs.io    自建代理：https://your-proxy.example.com")
         HStack {
             Button("前往 elevenlabs.io 注册") {
                 if let url = URL(string: "https://elevenlabs.io/sign-up") {
@@ -518,7 +523,8 @@ struct SettingsView: View {
         isCloning = true
         defer { isCloning = false }
 
-        let voices = ElevenLabsVoices(apiKey: ttsKey)
+        let baseURL = URL(string: ttsBase) ?? URL(string: "https://api.elevenlabs.io")!
+        let voices = ElevenLabsVoices(apiKey: ttsKey, baseURL: baseURL)
         do {
             let voiceID = try await voices.clone(
                 name: cloneName.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -598,6 +604,8 @@ struct SettingsView: View {
             guard !key.trimmingCharacters(in: .whitespaces).isEmpty,
                   !voice.trimmingCharacters(in: .whitespaces).isEmpty
             else { return nil }
+            let baseURLString = d.string(forKey: SettingsKeys.ttsBaseURL) ?? "https://api.elevenlabs.io"
+            let baseURL = URL(string: baseURLString) ?? URL(string: "https://api.elevenlabs.io")!
             let model = d.string(forKey: SettingsKeys.ttsModel) ?? "eleven_multilingual_v2"
             let stability = (d.object(forKey: SettingsKeys.ttsStability) as? Double) ?? 0.5
             let similarity = (d.object(forKey: SettingsKeys.ttsSimilarity) as? Double) ?? 0.75
@@ -605,10 +613,11 @@ struct SettingsView: View {
                 apiKey: key,
                 voiceID: voice,
                 modelID: model,
+                baseURL: baseURL,
                 stability: stability,
                 similarityBoost: similarity
             )
-            let voiceKey = "elevenlabs|\(voice)|\(model)|s=\(stability)|b=\(similarity)"
+            let voiceKey = "elevenlabs|\(baseURLString)|\(voice)|\(model)|s=\(stability)|b=\(similarity)"
             return CachingTTSProvider(
                 inner: base,
                 cacheDir: AppPaths.ttsCacheDir,

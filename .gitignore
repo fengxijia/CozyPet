@@ -21,3 +21,12 @@ Package.resolved
 
 # Local Claude Code state
 .claude/
+
+# Proxy secrets — committed `.example` only, real values go in ProxyConfig.swift (gitignored)
+Pet_app/Pet_app/ProxyConfig.swift
+proxy-server/.env
+proxy-server/node_modules/
+
+# Built release zips
+dist/
+

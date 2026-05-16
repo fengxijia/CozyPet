@@ -1,0 +1,23 @@
+[Unit]
+Description=CozyPet upstream proxy (Anthropic + ElevenLabs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to wherever you cloned the repo on the box. Caddy proxies to 127.0.0.1:PORT.
+WorkingDirectory=/opt/cozypet-proxy
+EnvironmentFile=/opt/cozypet-proxy/.env
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=3
+User=cozypet
+# Lock the process down — it never needs to write to anything outside its own dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/cozypet-proxy
+
+[Install]
+WantedBy=multi-user.target
