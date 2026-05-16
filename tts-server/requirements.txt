@@ -1,0 +1,8 @@
+# 这份只列 server 这一层额外加的依赖。
+# 主要的 torch / transformers / jieba / pyopenjtalk 这些走 Bert-VITS2 自家的 requirements.txt，
+# setup.sh 会先 `pip install -r Bert-VITS2/requirements.txt`，再装这里。
+
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+pydantic>=2.0,<3.0
+ffmpeg-python==0.2.0

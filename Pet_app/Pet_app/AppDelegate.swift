@@ -49,6 +49,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
             self.openWorkflowPanel()
         }
+        // 本地 Taffy TTS 服务：仅当 backend 选了本地 & 总开关打开时自动拉起。
+        syncLocalTTSServerWithSettings()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleTTSBackendChanged),
+            name: .ttsBackendChanged, object: nil
+        )
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // 不让 Python 子进程变孤儿
+        LocalTTSServer.shared.stop()
+    }
+
+    @objc private func handleTTSBackendChanged() {
+        syncLocalTTSServerWithSettings()
+    }
+
+    /// 根据 UserDefaults 里的 backend 决定本地 server 起 / 停。
+    private func syncLocalTTSServerWithSettings() {
+        let d = UserDefaults.standard
+        let backend = TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "")
+            ?? .elevenlabs
+        let enabled = d.bool(forKey: SettingsKeys.ttsEnabled)
+        if backend == .bertVITS2Local && enabled {
+            LocalTTSServer.shared.startIfNeeded()
+        } else {
+            LocalTTSServer.shared.stop()
+        }
     }
 
     /// SDWebImage 用 URL 字符串当 cache key —— 我们的桌宠 GIF 在 bundle 里

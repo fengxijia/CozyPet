@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 import PetCore
@@ -11,8 +12,20 @@ final class WorkflowStore: ObservableObject {
     private var doneKey: String { AppPaths.todayDoneKey() }
     private let loader = WorkflowLoader()
 
+    /// 当前 doneIDs 对应的日期 key。跨过 00:00 后跟 doneKey 不一致就触发归零。
+    private var loadedDoneKey: String = ""
+    private var midnightTimer: Timer?
+
     init() {
         reload()
+        scheduleMidnightRollover()
+        // 电脑睡过整夜 timer 不一定准点触发；前台激活时再补一次检查。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWillBecomeActive),
+            name: NSApplication.willBecomeActiveNotification,
+            object: nil
+        )
     }
 
     func reload() {
@@ -33,14 +46,55 @@ final class WorkflowStore: ObservableObject {
             self.lastError = "解析工作流失败：\(error)"
         }
 
-        let stored = UserDefaults.standard.stringArray(forKey: doneKey) ?? []
+        let key = doneKey
+        let stored = UserDefaults.standard.stringArray(forKey: key) ?? []
         self.doneIDs = Set(stored)
+        self.loadedDoneKey = key
     }
 
     func toggle(_ stepID: String) {
+        // 先确认当前 doneIDs 还是今天的 —— 防止跨午夜后写入了错的内存集合。
+        rolloverIfNeeded()
         if doneIDs.contains(stepID) { doneIDs.remove(stepID) }
         else { doneIDs.insert(stepID) }
         UserDefaults.standard.set(Array(doneIDs), forKey: doneKey)
+    }
+
+    // MARK: - 每日零点归零
+
+    @objc private func handleWillBecomeActive() {
+        rolloverIfNeeded()
+    }
+
+    /// 如果今天的 key 跟 loadedDoneKey 不一样了，就把 doneIDs 切到今天那份
+    /// （新一天通常是空集，于是所有任务都重新可勾选）。
+    private func rolloverIfNeeded() {
+        let today = doneKey
+        guard loadedDoneKey != today else { return }
+        let stored = UserDefaults.standard.stringArray(forKey: today) ?? []
+        doneIDs = Set(stored)
+        loadedDoneKey = today
+        // 既然刚刚触发了一次，重排下一次以保证之后每天都准点。
+        scheduleMidnightRollover()
+    }
+
+    private func scheduleMidnightRollover() {
+        midnightTimer?.invalidate()
+        let cal = Calendar.current
+        guard let nextMidnight = cal.nextDate(
+            after: Date(),
+            matching: DateComponents(hour: 0, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        ) else { return }
+        // 比零点多 1 秒，避开调度抖动导致 fire 时 doneKey 还停在昨天。
+        let fireDate = nextMidnight.addingTimeInterval(1)
+        let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.rolloverIfNeeded()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        midnightTimer = timer
     }
 
     // MARK: - CRUD
@@ -107,9 +161,9 @@ struct WorkflowPanel: View {
     @ObservedObject var store: WorkflowStore
     @ObservedObject var voice: VoicePlayer
     @StateObject private var notesStore = NotesStore()
-
-    @State private var editingStep: WorkflowStep?
-    @State private var isCreating = false
+    /// 编辑器单独开一个浮动 NSWindow（而不是 .sheet）—— 这样可以拖到旁边，
+    /// 不挡住后面的工作流面板。生命周期跟随 WorkflowPanel。
+    @StateObject private var editorWindow = StepEditorWindow()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -126,20 +180,6 @@ struct WorkflowPanel: View {
             footer
         }
         .frame(idealWidth: 540, idealHeight: 600)
-        .sheet(item: $editingStep) { step in
-            StepEditor(
-                mode: .edit(original: step),
-                store: store,
-                onClose: { editingStep = nil }
-            )
-        }
-        .sheet(isPresented: $isCreating) {
-            StepEditor(
-                mode: .create,
-                store: store,
-                onClose: { isCreating = false }
-            )
-        }
     }
 
     @ViewBuilder
@@ -152,7 +192,7 @@ struct WorkflowPanel: View {
                         done: store.doneIDs.contains(step.id),
                         onRun: { run(step) },
                         onToggle: { store.toggle(step.id) },
-                        onEdit: { editingStep = step },
+                        onEdit: { editorWindow.show(mode: .edit(original: step), store: store) },
                         onDelete: { store.deleteStep(id: step.id) }
                     )
                 }
@@ -183,7 +223,7 @@ struct WorkflowPanel: View {
             }
             Spacer()
             Button {
-                isCreating = true
+                editorWindow.show(mode: .create, store: store)
             } label: {
                 Label("新建", systemImage: "plus.circle.fill")
             }
@@ -205,7 +245,7 @@ struct WorkflowPanel: View {
             Text("还没有任何步骤")
                 .foregroundStyle(.secondary)
             Button {
-                isCreating = true
+                editorWindow.show(mode: .create, store: store)
             } label: {
                 Label("添加第一步", systemImage: "plus")
             }
@@ -276,7 +316,7 @@ private struct StepRow: View {
 
             Spacer()
 
-            Button(step.resolvedKind == .prompt ? "念一下" : "启动") { onRun() }
+            Button(runLabel) { onRun() }
                 .controlSize(.small)
 
             Menu {
@@ -294,16 +334,33 @@ private struct StepRow: View {
         .padding(.vertical, 4)
     }
 
+    /// "启动" / "念一下" / "启动 ×3" — 取决于这个步骤挂了几个动作
+    private var runLabel: String {
+        let count = step.resolvedActions.count
+        if count == 0 { return "念一下" }
+        if count == 1 { return "启动" }
+        return "启动 ×\(count)"
+    }
+
     private var stepDetail: String? {
-        switch step.resolvedKind {
+        let actions = step.resolvedActions
+        if actions.isEmpty { return "提醒" }
+        if actions.count == 1 {
+            return summarize(actions[0])
+        }
+        let first = summarize(actions[0]) ?? "…"
+        return "\(actions.count) 个动作：\(first) …"
+    }
+
+    private func summarize(_ a: StepAction) -> String? {
+        switch a.kind {
         case .app:
-            // app + path 组合：让 X app 打开 Y 路径
-            if let app = step.openApp, let path = step.openPath {
+            if let app = a.openApp, let path = a.openPath {
                 return "\(app) → \(path)"
             }
-            return step.openApp.map { "app: \($0)" }
-        case .url: return step.openURL.map { "url: \($0)" }
-        case .path: return step.openPath.map { "path: \($0)" }
+            return a.openApp.map { "app: \($0)" }
+        case .url: return a.openURL.map { "url: \($0)" }
+        case .path: return a.openPath.map { "path: \($0)" }
         case .prompt: return "提醒"
         }
     }
@@ -316,6 +373,98 @@ private enum EditorMode {
     case edit(original: WorkflowStep)
 }
 
+/// 编辑器里临时持有的动作（带 UI 用的 id 与一个可选的"app 打开路径"分栏）。
+/// app 类型时 `target` = bundle ID、`appOpenPath` = 可选的传给 app 的路径；
+/// path 类型 `target` = 路径本身；url 类型 `target` = URL。
+private struct EditableAction: Identifiable, Hashable {
+    let id: UUID
+    var kind: StepKind
+    var target: String
+    var appOpenPath: String
+
+    init(kind: StepKind = .app, target: String = "", appOpenPath: String = "") {
+        self.id = UUID()
+        self.kind = kind
+        self.target = target
+        self.appOpenPath = appOpenPath
+    }
+}
+
+/// 常用 app 的 bundle ID 预设
+private let appPresets: [(label: String, bundleID: String)] = [
+    ("VSCode", "com.microsoft.VSCode"),
+    ("Cursor", "com.todesktop.230313mzl4w4u92"),
+    ("Xcode", "com.apple.dt.Xcode"),
+    ("iTerm", "com.googlecode.iterm2"),
+    ("Terminal", "com.apple.Terminal"),
+    ("Safari", "com.apple.Safari"),
+    ("Chrome", "com.google.Chrome"),
+    ("Notion", "notion.id"),
+    ("Finder", "com.apple.finder"),
+]
+
+/// 常用 URL 预设 —— 给 .url 类型动作的快速填充菜单
+private let urlPresets: [(label: String, url: String)] = [
+    ("ChatGPT", "https://chatgpt.com"),
+    ("Claude", "https://claude.ai"),
+    ("Gemini", "https://gemini.google.com"),
+    ("LobeChat", "https://chat.lobehub.com"),
+    ("Google", "https://www.google.com"),
+    ("Google Scholar", "https://scholar.google.com"),
+    ("YouTube", "https://www.youtube.com"),
+    ("GitHub", "https://github.com"),
+    ("Bilibili", "https://www.bilibili.com"),
+    ("X / Twitter", "https://x.com"),
+    ("知乎", "https://www.zhihu.com"),
+    ("arXiv", "https://arxiv.org"),
+    ("Notion", "https://www.notion.so"),
+]
+
+/// 把"新建 / 编辑步骤"做成可拖动的独立 NSWindow，而不是模态 .sheet。
+/// 这样用户可以把编辑器拖到旁边，一边对照工作流列表一边改。
+/// 同一时刻只保留一个编辑窗口 —— 再次调用 show() 会把旧窗口关掉换内容。
+@MainActor
+final class StepEditorWindow: ObservableObject {
+    private var window: NSWindow?
+
+    fileprivate func show(mode: EditorMode, store: WorkflowStore) {
+        close()
+
+        let title: String
+        switch mode {
+        case .create: title = "新建步骤"
+        case .edit:   title = "编辑步骤"
+        }
+
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        // 弱引用 self，避免 onClose 把 window 抓住后两边互持
+        let view = StepEditor(
+            mode: mode,
+            store: store,
+            onClose: { [weak self] in self?.close() }
+        )
+        let hosting = NSHostingController(rootView: view)
+        win.title = title
+        win.contentMinSize = NSSize(width: 460, height: 480)
+        win.contentViewController = hosting
+        win.isReleasedWhenClosed = false
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window = win
+    }
+
+    fileprivate func close() {
+        window?.close()
+        window = nil
+    }
+}
+
 private struct StepEditor: View {
     let mode: EditorMode
     @ObservedObject var store: WorkflowStore
@@ -323,26 +472,9 @@ private struct StepEditor: View {
 
     @State private var stepID: String = ""
     @State private var say: String = ""
-    @State private var kind: StepKind = .prompt
-    @State private var target: String = ""
-    /// 仅当 kind == .app 时使用：可选的路径，会被传给那个 app 打开
-    /// （比如 VSCode + 项目文件夹路径）。
-    @State private var appOpenPath: String = ""
+    @State private var actions: [EditableAction] = []
     @State private var thenPrompt: String = ""
     @State private var error: String?
-
-    /// 常用 app 的 bundle ID 预设
-    private static let appPresets: [(label: String, bundleID: String)] = [
-        ("VSCode", "com.microsoft.VSCode"),
-        ("Cursor", "com.todesktop.230313mzl4w4u92"),
-        ("Xcode", "com.apple.dt.Xcode"),
-        ("iTerm", "com.googlecode.iterm2"),
-        ("Terminal", "com.apple.Terminal"),
-        ("Safari", "com.apple.Safari"),
-        ("Chrome", "com.google.Chrome"),
-        ("Notion", "notion.id"),
-        ("Finder", "com.apple.finder"),
-    ]
 
     private var isEditing: Bool {
         if case .edit = mode { return true }
@@ -373,50 +505,36 @@ private struct StepEditor: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                Section("动作") {
-                    Picker("类型", selection: $kind) {
-                        Text("打开 App").tag(StepKind.app)
-                        Text("打开 URL").tag(StepKind.url)
-                        Text("打开路径").tag(StepKind.path)
-                        Text("纯提醒（无动作）").tag(StepKind.prompt)
-                    }
-                    .pickerStyle(.segmented)
-
-                    switch kind {
-                    case .app:
-                        HStack {
-                            TextField("Bundle ID，如 com.apple.Safari", text: $target)
-                                .textFieldStyle(.roundedBorder)
-                            Menu("常用") {
-                                ForEach(Self.appPresets, id: \.bundleID) { p in
-                                    Button("\(p.label) — \(p.bundleID)") { target = p.bundleID }
+                Section {
+                    if actions.isEmpty {
+                        Text("没有动作 —— 这个步骤会作为纯提醒（点「念一下」时只念话）")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach($actions) { $action in
+                            ActionEditorRow(
+                                action: $action,
+                                onDelete: {
+                                    actions.removeAll { $0.id == action.id }
                                 }
-                            }
-                            .controlSize(.small)
-                            .frame(width: 70)
+                            )
                         }
-                        HStack {
-                            TextField("可选：打开这个路径（让 app 接收）", text: $appOpenPath)
-                                .textFieldStyle(.roundedBorder)
-                            Button("选…") { pickAppOpenPath() }
-                                .controlSize(.small)
+                    }
+                    Button {
+                        actions.append(EditableAction(kind: .app))
+                    } label: {
+                        Label("添加一个动作", systemImage: "plus.circle")
+                    }
+                    .controlSize(.small)
+                } header: {
+                    HStack {
+                        Text("动作")
+                        Spacer()
+                        if !actions.isEmpty {
+                            Text("点「启动」时会一起触发 \(actions.count) 个")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
-                        Text("例：用 VSCode 打开项目 → Bundle ID 选 VSCode，路径选 EMNLP26_SnowballCost 文件夹")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    case .url:
-                        TextField("https://… 或 notion://…", text: $target)
-                            .textFieldStyle(.roundedBorder)
-                    case .path:
-                        HStack {
-                            TextField("/Users/.../folder", text: $target)
-                                .textFieldStyle(.roundedBorder)
-                            Button("选…") { pickPath() }
-                                .controlSize(.small)
-                        }
-                        Text("默认会用 Finder 打开。想用某个 app 打开请换上面的「打开 App」类型。")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    case .prompt:
-                        EmptyView()
                     }
                 }
 
@@ -445,7 +563,7 @@ private struct StepEditor: View {
             }
             .padding()
         }
-        .frame(minWidth: 460, idealWidth: 500, minHeight: 460, idealHeight: 520)
+        .frame(minWidth: 480, idealWidth: 540, minHeight: 520, idealHeight: 600)
         .onAppear { loadInitial() }
     }
 
@@ -453,38 +571,27 @@ private struct StepEditor: View {
         if case .edit(let s) = mode {
             stepID = s.id
             say = s.say ?? ""
-            kind = s.resolvedKind
-            switch s.resolvedKind {
-            case .app:
-                target = s.openApp ?? ""
-                appOpenPath = s.openPath ?? ""   // 「用 X app 打开 Y 路径」的 Y
-            case .url: target = s.openURL ?? ""
-            case .path: target = s.openPath ?? ""
-            case .prompt: target = ""
-            }
             thenPrompt = s.thenPrompt ?? ""
+            // 已有的步骤：通过 resolvedActions 统一拿到动作数组（兼容老 yaml 的单字段）
+            actions = s.resolvedActions.map { a in
+                EditableAction(
+                    kind: a.kind,
+                    target: target(for: a),
+                    appOpenPath: a.kind == .app ? (a.openPath ?? "") : ""
+                )
+            }
         } else {
             stepID = "step-\(Int(Date().timeIntervalSince1970))"
+            actions = [EditableAction(kind: .app)]
         }
     }
 
-    private func pickPath() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.urls.first {
-            target = url.path
-        }
-    }
-
-    private func pickAppOpenPath() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.urls.first {
-            appOpenPath = url.path
+    private func target(for a: StepAction) -> String {
+        switch a.kind {
+        case .app: return a.openApp ?? ""
+        case .url: return a.openURL ?? ""
+        case .path: return a.openPath ?? ""
+        case .prompt: return ""
         }
     }
 
@@ -499,44 +606,75 @@ private struct StepEditor: View {
             return
         }
 
-        // 路径字段只去换行，不去空格 —— 文件夹名末尾可以合法地带空格
-        // （macOS 完全允许，NSOpenPanel 也会原样返回）。
-        let pathOnlyTarget = target.trimmingCharacters(in: .newlines)
-        let trimmedTarget = target.trimmingCharacters(in: .whitespaces)
-
-        if kind != .prompt {
-            let hasTarget = (kind == .path)
-                ? !pathOnlyTarget.isEmpty
-                : !trimmedTarget.isEmpty
+        // 校验每个动作；路径字段只去换行不去空格
+        var cleaned: [(kind: StepKind, target: String, appOpenPath: String)] = []
+        for (idx, a) in actions.enumerated() {
+            let pathOnlyTarget = a.target.trimmingCharacters(in: .newlines)
+            let trimmedTarget = a.target.trimmingCharacters(in: .whitespaces)
+            let hasTarget = (a.kind == .path) ? !pathOnlyTarget.isEmpty : !trimmedTarget.isEmpty
             if !hasTarget {
-                error = "这个动作类型必须填目标"
+                error = "第 \(idx + 1) 个动作的目标没填"
                 return
             }
+            let t: String = (a.kind == .path) ? pathOnlyTarget : trimmedTarget
+            let appPath = a.appOpenPath.trimmingCharacters(in: .newlines)
+            cleaned.append((a.kind, t, appPath))
         }
 
         let trimmedSay = say.trimmingCharacters(in: .whitespaces)
         let trimmedThen = thenPrompt.trimmingCharacters(in: .whitespaces)
-        let pathOnlyAppPath = appOpenPath.trimmingCharacters(in: .newlines)
+        let saySafe: String? = trimmedSay.isEmpty ? nil : trimmedSay
+        let thenSafe: String? = trimmedThen.isEmpty ? nil : trimmedThen
 
-        // .app 类型可以额外带一个路径，runner 会把路径交给 app 打开。
-        // .path 类型则单独走 path，没有伴随 bundle id。
-        let openPathField: String? = {
-            switch kind {
-            case .app: return pathOnlyAppPath.isEmpty ? nil : pathOnlyAppPath
-            case .path: return pathOnlyTarget
-            default: return nil
+        let step: WorkflowStep
+        switch cleaned.count {
+        case 0:
+            // 纯提醒
+            step = WorkflowStep(
+                id: trimmedID,
+                say: saySafe,
+                kind: .prompt,
+                thenPrompt: thenSafe
+            )
+        case 1:
+            // 单动作 —— 写到老字段保持 yaml 简洁、向后可读
+            let c = cleaned[0]
+            let openPathField: String? = {
+                switch c.kind {
+                case .app: return c.appOpenPath.isEmpty ? nil : c.appOpenPath
+                case .path: return c.target
+                default: return nil
+                }
+            }()
+            step = WorkflowStep(
+                id: trimmedID,
+                say: saySafe,
+                openApp: c.kind == .app ? c.target : nil,
+                openURL: c.kind == .url ? c.target : nil,
+                openPath: openPathField,
+                kind: nil,
+                thenPrompt: thenSafe
+            )
+        default:
+            // 多动作 —— 写到 actions 数组，老字段全部留空
+            let list: [StepAction] = cleaned.map { c in
+                StepAction(
+                    kind: c.kind,
+                    openApp: c.kind == .app ? c.target : nil,
+                    openURL: c.kind == .url ? c.target : nil,
+                    openPath: c.kind == .app
+                        ? (c.appOpenPath.isEmpty ? nil : c.appOpenPath)
+                        : (c.kind == .path ? c.target : nil)
+                )
             }
-        }()
-
-        let step = WorkflowStep(
-            id: trimmedID,
-            say: trimmedSay.isEmpty ? nil : trimmedSay,
-            openApp: kind == .app ? trimmedTarget : nil,
-            openURL: kind == .url ? trimmedTarget : nil,
-            openPath: openPathField,
-            kind: kind == .prompt ? .prompt : nil,
-            thenPrompt: trimmedThen.isEmpty ? nil : trimmedThen
-        )
+            step = WorkflowStep(
+                id: trimmedID,
+                say: saySafe,
+                kind: nil,
+                thenPrompt: thenSafe,
+                actions: list
+            )
+        }
 
         if isEditing {
             store.updateStep(step)
@@ -547,11 +685,138 @@ private struct StepEditor: View {
     }
 }
 
-// MARK: - 暖心便签 (Encouragement notes)
+private struct ActionEditorRow: View {
+    @Binding var action: EditableAction
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Picker("", selection: $action.kind) {
+                    Text("打开 App").tag(StepKind.app)
+                    Text("打开 URL").tag(StepKind.url)
+                    Text("打开路径").tag(StepKind.path)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("删除这个动作")
+            }
+
+            switch action.kind {
+            case .app:
+                HStack {
+                    TextField("Bundle ID，如 com.apple.Safari", text: $action.target)
+                        .textFieldStyle(.roundedBorder)
+                    Menu("常用") {
+                        ForEach(appPresets, id: \.bundleID) { p in
+                            Button("\(p.label) — \(p.bundleID)") { action.target = p.bundleID }
+                        }
+                    }
+                    .controlSize(.small)
+                    .frame(width: 70)
+                }
+                HStack {
+                    TextField("可选：让该 app 打开这个路径", text: $action.appOpenPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("选…") { pickAppOpenPath() }
+                        .controlSize(.small)
+                }
+            case .url:
+                HStack {
+                    TextField("https://… 或 notion://…", text: $action.target)
+                        .textFieldStyle(.roundedBorder)
+                    Menu("常用") {
+                        ForEach(urlPresets, id: \.url) { p in
+                            Button("\(p.label) — \(p.url)") { action.target = p.url }
+                        }
+                    }
+                    .controlSize(.small)
+                    .frame(width: 70)
+                }
+            case .path:
+                HStack {
+                    TextField("/Users/.../folder", text: $action.target)
+                        .textFieldStyle(.roundedBorder)
+                    Button("选…") { pickPath() }
+                        .controlSize(.small)
+                }
+            case .prompt:
+                // 多动作场景里不会出现 prompt 类型 —— 它由"没有动作"表达
+                EmptyView()
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(.gray.opacity(0.08))
+        )
+    }
+
+    private func pickPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.urls.first {
+            action.target = url.path
+        }
+    }
+
+    private func pickAppOpenPath() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.urls.first {
+            action.appOpenPath = url.path
+        }
+    }
+}
+
+// MARK: - 爱心便签 (Encouragement notes)
 
 struct WorkflowNote: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var text: String = ""
+    var icon: String = NoteIcon.default
+
+    enum CodingKeys: String, CodingKey { case id, text, icon }
+
+    init(id: UUID = UUID(), text: String = "", icon: String = NoteIcon.default) {
+        self.id = id
+        self.text = text
+        self.icon = icon
+    }
+
+    // 老数据没有 icon 字段 —— 缺省给个 ❤️，不要让一次解码失败把整组便签都清空。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.text = try c.decode(String.self, forKey: .text)
+        self.icon = (try? c.decode(String.self, forKey: .icon)) ?? NoteIcon.default
+    }
+}
+
+/// 便签前面的小图案 —— 暖心 / 效率建议 / 灵感 等。用 emoji 而不是 SF Symbol，
+/// 颜色和语义一眼能分清，列表里也不至于全是粉色心。
+enum NoteIcon {
+    static let `default` = "❤️"
+    static let options: [(emoji: String, label: String)] = [
+        ("❤️", "暖心"),
+        ("💡", "效率建议"),
+        ("⭐", "重要"),
+        ("✨", "灵感"),
+        ("☀️", "鼓励"),
+        ("🌸", "放松"),
+        ("🔥", "紧急"),
+        ("📌", "待办"),
+    ]
 }
 
 /// 跟 todo 完全隔离 —— 这边是给自己写鼓励 / 提醒 / 小温暖的，
@@ -567,7 +832,7 @@ final class NotesStore: ObservableObject {
         guard FileManager.default.fileExists(atPath: file.path),
               let data = try? Data(contentsOf: file),
               let decoded = try? JSONDecoder().decode([WorkflowNote].self, from: data) else {
-            // 第一次打开（没文件）：塞几条默认的暖心便签；用户随时可改可删。
+            // 第一次打开（没文件）：塞几条默认的爱心便签；用户随时可改可删。
             notes = NotesStore.defaultNotes
             persist()
             return
@@ -582,7 +847,8 @@ final class NotesStore: ObservableObject {
     ]
 
     func add() {
-        notes.append(WorkflowNote(text: ""))
+        // 新便签放最前面 —— 刚写下的念头通常最想被看见 / 优先念出来。
+        notes.insert(WorkflowNote(text: ""), at: 0)
         persist()
     }
 
@@ -595,6 +861,13 @@ final class NotesStore: ObservableObject {
         guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
         guard notes[idx].text != text else { return }
         notes[idx].text = text
+        persist()
+    }
+
+    func updateIcon(_ id: UUID, _ icon: String) {
+        guard let idx = notes.firstIndex(where: { $0.id == id }) else { return }
+        guard notes[idx].icon != icon else { return }
+        notes[idx].icon = icon
         persist()
     }
 
@@ -635,7 +908,7 @@ private struct NotesPanel: View {
             HStack {
                 Image(systemName: "heart.text.square")
                     .foregroundStyle(.pink.opacity(0.7))
-                Text("暖心便签")
+                Text("爱心便签")
                     .font(.subheadline.weight(.semibold))
                 Text("\(store.notes.count)")
                     .font(.caption2)
@@ -684,6 +957,8 @@ private struct NotesPanel: View {
                                 get: { note.text },
                                 set: { store.updateText(note.id, $0) }
                             ),
+                            icon: note.icon,
+                            onIconChange: { store.updateIcon(note.id, $0) },
                             onDelete: { store.delete(note.id) }
                         )
                         .listRowSeparator(.hidden)
@@ -752,14 +1027,29 @@ private struct NotesPanel: View {
 
 private struct NoteRow: View {
     @Binding var text: String
+    let icon: String
+    let onIconChange: (String) -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "heart.fill")
-                .font(.caption2)
-                .foregroundStyle(.pink.opacity(0.55))
-                .padding(.top, 9)
+            Menu {
+                ForEach(NoteIcon.options, id: \.emoji) { opt in
+                    Button {
+                        onIconChange(opt.emoji)
+                    } label: {
+                        Text("\(opt.emoji)  \(opt.label)")
+                    }
+                }
+            } label: {
+                Text(icon)
+                    .font(.system(size: 15))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .padding(.top, 6)
+            .help("换个图案")
 
             TextField("写点鼓励的话…", text: $text, axis: .vertical)
                 .lineLimit(1...4)

@@ -10,6 +10,9 @@ struct PetSpriteView: View {
     let onTap: () -> Void
 
     @State private var bobbing: CGFloat = 0
+    /// 当前 mood 抽到的具体变体资源名（doro-cheer-2 之类）。空串表示还没抽过。
+    /// 只在 mood 切换或激活宠物切换时重抽，避免每次 re-render 都换图导致闪烁。
+    @State private var pickedAssetName: String = ""
 
     var body: some View {
         switch app.displayMode {
@@ -39,6 +42,7 @@ struct PetSpriteView: View {
                         state.noteInteraction()
                         onTap()
                     },
+                    onDoubleTap: { app.setDisplayMode(.mini) },
                     onPickMode: { app.setDisplayMode($0) },
                     onSay: { state.say("嗨～", mood: .talk) },
                     onCycleMood: { state.cycleMood() }
@@ -56,17 +60,17 @@ struct PetSpriteView: View {
         .padding(8)
     }
 
-    /// 「仅图标」模式：只有一个小动图，点一下就回到完整模式（带气泡 + 输入条）。
+    /// 「仅图标」模式：只有一个小动图，双击回到完整模式（带气泡 + 输入条）。
+    /// 单击不放大 —— 单击/拖拽用的是 NSWindow.performDrag，mini 窗口 110x110 小，
+    /// 拖动时 origin 变化经常被判为 0，会被误识别成"点击"。所以放大门槛设成双击。
     /// 不显示气泡（mini 状态下用户主动收起来就是为了清屏，硬塞气泡反而打扰）。
     /// 拖拽 / 右键菜单仍然保留。
     private var miniBody: some View {
         ZStack {
             spriteForCurrentMood
             PetDragHandle(
-                onTap: {
-                    state.noteInteraction()
-                    app.setDisplayMode(.full)
-                },
+                onTap: { state.noteInteraction() },
+                onDoubleTap: { app.setDisplayMode(.full) },
                 onPickMode: { app.setDisplayMode($0) },
                 onSay: { state.say("嗨～", mood: .talk) },
                 onCycleMood: { state.cycleMood() }
@@ -89,20 +93,37 @@ struct PetSpriteView: View {
     }
 
     /// 资源名候选顺序：
-    /// 1. 当前宠物 + 当前 mood（doro-talk）
-    /// 2. 当前宠物 + idle（doro-idle）
-    /// 3. 全局 + 当前 mood（pet-talk）
-    /// 4. 全局 + idle（pet-idle）
+    /// 1. 当前 mood 抽到的变体（doro-cheer-2）—— 由 `pickedAssetName` 决定，mood 不变就不变
+    /// 2. 当前宠物 + 当前 mood 的主图（doro-cheer）
+    /// 3. 当前宠物 + idle（doro-idle）
+    /// 4. 全局 + 当前 mood（pet-cheer）
+    /// 5. 全局 + idle（pet-idle）
     /// 全没就 emoji。
     private var assetCandidates: [String] {
         let prefix = petStore.active.assetPrefix
         let mood = state.mood.rawValue
-        return [
-            "\(prefix)-\(mood)",
-            "\(prefix)-idle",
-            "pet-\(mood)",
-            "pet-idle",
-        ]
+        var list: [String] = []
+        if !pickedAssetName.isEmpty { list.append(pickedAssetName) }
+        list.append("\(prefix)-\(mood)")
+        list.append("\(prefix)-idle")
+        list.append("pet-\(mood)")
+        list.append("pet-idle")
+        return list
+    }
+
+    /// 给当前 (active pet, mood) 抽一个变体。优先扫 `prefix-mood`、`prefix-mood-2` … `prefix-mood-5`，
+    /// 在 bundle 里实际存在的几个里随机挑一个。没扫到就置空，让 `assetCandidates` 走主图 fallback。
+    private func repickVariant() {
+        let prefix = petStore.active.assetPrefix
+        let mood = state.mood.rawValue
+        var existing: [String] = []
+        for n in 1...5 {
+            let name = n == 1 ? "\(prefix)-\(mood)" : "\(prefix)-\(mood)-\(n)"
+            if resolveSprite(name: name) != nil {
+                existing.append(name)
+            }
+        }
+        pickedAssetName = existing.randomElement() ?? ""
     }
 
     /// 把名字解析为可加载的资源：先找 bundle 里的 GIF（作为普通文件，actool 不支持 GIF），
@@ -125,18 +146,23 @@ struct PetSpriteView: View {
     @ViewBuilder
     private var spriteForCurrentMood: some View {
         let resolved = assetCandidates.lazy.compactMap(resolveSprite(name:)).first
-        switch resolved {
-        case .gif(let url):
-            AnimatedImage(url: url)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        case .asset(let name):
-            AnimatedImage(name: name)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        case nil:
-            Text(placeholder).font(.system(size: 96))
+        Group {
+            switch resolved {
+            case .gif(let url):
+                AnimatedImage(url: url)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            case .asset(let name):
+                AnimatedImage(name: name)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            case nil:
+                Text(placeholder).font(.system(size: 96))
+            }
         }
+        .onAppear { repickVariant() }
+        .onChange(of: state.mood) { _, _ in repickVariant() }
+        .onChange(of: petStore.roster.active) { _, _ in repickVariant() }
     }
 
     private var placeholder: String {
@@ -160,7 +186,6 @@ struct PetSpriteView: View {
         case .cheer: 1.10
         case .sad: 0.95
         case .sleep: 0.92
-        case .think: 1.02
         case .confused: 1.0
         default: 1.0
         }
@@ -222,38 +247,43 @@ private struct InlineChatBar: View {
 /// `NSWindow.performDrag(with:)` 走 AppKit 原生 drag loop，跟系统标题栏一样跟手。
 /// 同时承担：
 /// - 点一下（窗口没动）→ onTap
+/// - 双击 → onDoubleTap（mini ↔ full 切换；走 clickCount==2 提前返回，不走 performDrag）
 /// - 右键 → 弹自己拼的 NSMenu（替代 SwiftUI 的 .contextMenu）
 struct PetDragHandle: NSViewRepresentable {
     let onTap: () -> Void
+    let onDoubleTap: () -> Void
     let onPickMode: (PetDisplayMode) -> Void
     let onSay: () -> Void
     let onCycleMood: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         let v = PetDragHandleView()
-        v.apply(onTap: onTap, onPickMode: onPickMode, onSay: onSay, onCycleMood: onCycleMood)
+        v.apply(onTap: onTap, onDoubleTap: onDoubleTap, onPickMode: onPickMode, onSay: onSay, onCycleMood: onCycleMood)
         return v
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         guard let v = nsView as? PetDragHandleView else { return }
-        v.apply(onTap: onTap, onPickMode: onPickMode, onSay: onSay, onCycleMood: onCycleMood)
+        v.apply(onTap: onTap, onDoubleTap: onDoubleTap, onPickMode: onPickMode, onSay: onSay, onCycleMood: onCycleMood)
     }
 }
 
 final class PetDragHandleView: NSView {
     private var onTap: (() -> Void)?
+    private var onDoubleTap: (() -> Void)?
     private var onPickMode: ((PetDisplayMode) -> Void)?
     private var onSay: (() -> Void)?
     private var onCycleMood: (() -> Void)?
 
     func apply(
         onTap: @escaping () -> Void,
+        onDoubleTap: @escaping () -> Void,
         onPickMode: @escaping (PetDisplayMode) -> Void,
         onSay: @escaping () -> Void,
         onCycleMood: @escaping () -> Void
     ) {
         self.onTap = onTap
+        self.onDoubleTap = onDoubleTap
         self.onPickMode = onPickMode
         self.onSay = onSay
         self.onCycleMood = onCycleMood
@@ -262,6 +292,11 @@ final class PetDragHandleView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        // 双击：直接走切换，不进 performDrag —— 否则双击的第二下会被拖拽逻辑吃掉
+        if event.clickCount >= 2 {
+            onDoubleTap?()
+            return
+        }
         guard let win = window else { return }
         let originBefore = win.frame.origin
         win.performDrag(with: event) // blocks until mouseUp；AppKit 原生 drag，零延迟

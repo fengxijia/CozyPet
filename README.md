@@ -11,7 +11,7 @@
 
 - **浮窗桌宠** — 透明无边框 NSWindow，跨 Space / 跨全屏跟着你；可拖、可切换「完整 / 仅图标 / 隐藏」三种显示形态
 - **今日工作流** — YAML 描述的 todo 列表，点一下启动对应 app / 网址 / 文件夹；首次打开自动念一遍清单
-- **暖心便签** — 跟 todo 完全分开的一块小区域，写给自己的鼓励 / 提醒。可拖动排序、可调整与 todo 的高度占比、可点喇叭依次念出来，被打断后续读
+- **爱心便签** — 跟 todo 完全分开的一块小区域，写给自己的鼓励 / 提醒。可拖动排序、可调整与 todo 的高度占比、可点喇叭依次念出来，被打断后续读
 - **桌宠聊天** — 桌宠脚下一行小输入条，回车直接发 Claude，流式打字回在头顶气泡里；persona 走 prompt caching
 - **语音克隆** — 接 ElevenLabs，可以在设置里上传一段你想要的音色样本一键克隆，桌宠说话直接换你给的音色；同一段文字带磁盘缓存，再念就不走网络
 
@@ -62,7 +62,7 @@ Xcode 打开后第一次会自动拉 SwiftPM 依赖（Yams、SDWebImage），等
 ```
 workflow.yaml   — 今日工作流，每条 step 改 say + open_url / open_app / open_path
 pets.yaml       — 多只宠物的元数据（图片前缀、名字）
-notes.json      — 暖心便签（一般通过 UI 改）
+notes.json      — 爱心便签（一般通过 UI 改）
 persona.yaml    — 桌宠对话人格，热重载（改完不用重开 app）
 tts-cache/      — ElevenLabs 合成结果的本地缓存（删掉会重新走网络）
 ```
@@ -93,7 +93,7 @@ Packages/PetCore/         本地 SPM 包，纯逻辑（YAML 解析 / LLM / TTS /
 Pet_app/                  Xcode 项目（UI + AppKit 胶水）
   Pet_app/
     PetWindow/            浮窗、状态机、气泡、AppKit 拖拽
-    Workflow/             工作流面板、暖心便签、step 启动器
+    Workflow/             工作流面板、爱心便签、step 启动器
     Chat/                 聊天 popover + 桌宠脚下输入条
     Settings/             四 tab 设置窗
     Voice/                ElevenLabs 播放

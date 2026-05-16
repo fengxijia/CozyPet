@@ -15,6 +15,23 @@ enum LLMBackend: String, CaseIterable {
     }
 }
 
+enum TTSBackend: String, CaseIterable {
+    case elevenlabs = "elevenlabs"
+    case bertVITS2Local = "bertvits2_local"  // 本地跑 Bert-VITS2，xzjosh 的 Taffy 音色
+
+    var label: String {
+        switch self {
+        case .elevenlabs: "ElevenLabs（云端）"
+        case .bertVITS2Local: "本地 Bert-VITS2 Taffy"
+        }
+    }
+}
+
+/// Settings 里切了 TTS backend 之后发这个；AppDelegate 监听后决定 start / stop Python server。
+extension Notification.Name {
+    static let ttsBackendChanged = Notification.Name("pet.tts.backendChanged")
+}
+
 enum SettingsKeys {
     static let backend = "llm.backend"
 
@@ -29,8 +46,11 @@ enum SettingsKeys {
     static let openaiBaseURL = "openai.base_url"
     static let openaiModel = "openai.model"
 
-    // TTS（ElevenLabs）
+    // TTS 通用
     static let ttsEnabled = "tts.enabled"
+    static let ttsBackend = "tts.backend"      // TTSBackend.rawValue
+
+    // TTS（ElevenLabs）
     static let ttsAPIKey = "tts.elevenlabs.api_key"
     static let ttsVoiceID = "tts.elevenlabs.voice_id"
     static let ttsModel = "tts.elevenlabs.model"
@@ -53,11 +73,14 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.openaiModel) private var openaiModel: String = "gemini-2.5-flash"
 
     @AppStorage(SettingsKeys.ttsEnabled) private var ttsEnabled: Bool = false
+    @AppStorage(SettingsKeys.ttsBackend) private var ttsBackend: String = TTSBackend.elevenlabs.rawValue
     @AppStorage(SettingsKeys.ttsAPIKey) private var ttsKey: String = ""
     @AppStorage(SettingsKeys.ttsVoiceID) private var ttsVoiceID: String = ""
     @AppStorage(SettingsKeys.ttsModel) private var ttsModel: String = "eleven_multilingual_v2"
     @AppStorage(SettingsKeys.ttsStability) private var ttsStability: Double = 0.5
     @AppStorage(SettingsKeys.ttsSimilarity) private var ttsSimilarity: Double = 0.75
+
+    @ObservedObject private var localTTSServer = LocalTTSServer.shared
 
     @State private var showAnthropicKey: Bool = false
     @State private var showOpenAIKey: Bool = false
@@ -306,38 +329,125 @@ struct SettingsView: View {
     }
 
     private var ttsSection: some View {
-        Section("语音 (ElevenLabs TTS)") {
+        Section("语音") {
             Toggle("说话时念出来（聊天回复 + 桌宠提醒）", isOn: $ttsEnabled)
-            keyField(placeholder: "ELEVENLABS_API_KEY", text: $ttsKey, visible: $showTTSKey)
-            HStack {
-                Button("前往 elevenlabs.io 注册") {
-                    if let url = URL(string: "https://elevenlabs.io/sign-up") {
-                        NSWorkspace.shared.open(url)
-                    }
+                .onChange(of: ttsEnabled) { _, _ in
+                    NotificationCenter.default.post(name: .ttsBackendChanged, object: nil)
                 }
-                .controlSize(.small)
-                Text("没账号点这里").font(.caption2).foregroundStyle(.secondary)
+            Picker("TTS 后端", selection: $ttsBackend) {
+                ForEach(TTSBackend.allCases, id: \.rawValue) { b in
+                    Text(b.label).tag(b.rawValue)
+                }
             }
-            TextField("Voice ID", text: $ttsVoiceID)
-                .textFieldStyle(.roundedBorder)
-                .help("用下面的克隆功能自动填，或自己去 Voice Lab 复制粘贴")
-            Picker("模型", selection: $ttsModel) {
-                Text("eleven_multilingual_v2（推荐 / 中英混读）").tag("eleven_multilingual_v2")
-                Text("eleven_turbo_v2_5（快 / 便宜）").tag("eleven_turbo_v2_5")
-                Text("eleven_v3（最新 / 表现力强）").tag("eleven_v3")
-            }
-            HStack {
-                Text("稳定度 \(String(format: "%.2f", ttsStability))").frame(width: 100, alignment: .leading)
-                Slider(value: $ttsStability, in: 0...1)
-            }
-            HStack {
-                Text("相似度 \(String(format: "%.2f", ttsSimilarity))").frame(width: 100, alignment: .leading)
-                Slider(value: $ttsSimilarity, in: 0...1)
+            .pickerStyle(.segmented)
+            .onChange(of: ttsBackend) { _, _ in
+                NotificationCenter.default.post(name: .ttsBackendChanged, object: nil)
             }
 
-            Divider()
-            voiceCloneSection
+            if ttsBackend == TTSBackend.bertVITS2Local.rawValue {
+                localTTSSection
+            } else {
+                elevenLabsSection
+            }
         }
+    }
+
+    /// ElevenLabs（云端）面板 —— 老的字段都迁过来。
+    @ViewBuilder
+    private var elevenLabsSection: some View {
+        keyField(placeholder: "ELEVENLABS_API_KEY", text: $ttsKey, visible: $showTTSKey)
+        HStack {
+            Button("前往 elevenlabs.io 注册") {
+                if let url = URL(string: "https://elevenlabs.io/sign-up") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .controlSize(.small)
+            Text("没账号点这里").font(.caption2).foregroundStyle(.secondary)
+        }
+        TextField("Voice ID", text: $ttsVoiceID)
+            .textFieldStyle(.roundedBorder)
+            .help("用下面的克隆功能自动填，或自己去 Voice Lab 复制粘贴")
+        Picker("模型", selection: $ttsModel) {
+            Text("eleven_multilingual_v2（推荐 / 中英混读）").tag("eleven_multilingual_v2")
+            Text("eleven_turbo_v2_5（快 / 便宜）").tag("eleven_turbo_v2_5")
+            Text("eleven_v3（最新 / 表现力强）").tag("eleven_v3")
+        }
+        HStack {
+            Text("稳定度 \(String(format: "%.2f", ttsStability))").frame(width: 100, alignment: .leading)
+            Slider(value: $ttsStability, in: 0...1)
+        }
+        HStack {
+            Text("相似度 \(String(format: "%.2f", ttsSimilarity))").frame(width: 100, alignment: .leading)
+            Slider(value: $ttsSimilarity, in: 0...1)
+        }
+
+        Divider()
+        voiceCloneSection
+    }
+
+    /// 本地 Bert-VITS2 Taffy 面板 —— 状态 pill + 操作按钮。
+    @ViewBuilder
+    private var localTTSSection: some View {
+        Text("跑的是 xzjosh 永雏塔菲音色（Bert-VITS2 v2.3）。中文最自然；英文 / 日文也能念，但毕竟是中文音色训出来的，混排时口音会偏「塔菲念英语」—— 如果觉得太假可以切回 ElevenLabs。")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        HStack(spacing: 8) {
+            Text("状态")
+            statusPill(localTTSServer.status)
+            Spacer()
+        }
+
+        if !localTTSServer.isInstalled {
+            HStack {
+                Text("还没装好（缺 venv 或 server.py）").font(.caption).foregroundStyle(.orange)
+                Spacer()
+                Button("一键安装") { localTTSServer.openInstallerInTerminal() }
+                    .controlSize(.small)
+            }
+            Text("安装会在 Terminal 弹个新窗口跑 ~/Code/pet/tts-server/setup.sh，大概 15-30 分钟（要 git-lfs 拉 ~4GB 模型）。装完点上面的「重启服务」。")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        HStack {
+            Button("重启服务") { localTTSServer.restart() }
+                .controlSize(.small)
+                .disabled(!localTTSServer.isInstalled)
+            Button("打开模型目录") { localTTSServer.openServerDirectoryInFinder() }
+                .controlSize(.small)
+            Button("看 server.log") { localTTSServer.openLog() }
+                .controlSize(.small)
+            Button("重新安装") { localTTSServer.openInstallerInTerminal() }
+                .controlSize(.small)
+        }
+
+        if case .crashed(let msg) = localTTSServer.status {
+            Text(msg)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+                .lineLimit(8)
+        }
+    }
+
+    @ViewBuilder
+    private func statusPill(_ status: LocalTTSServer.Status) -> some View {
+        let (text, color): (String, Color) = {
+            switch status {
+            case .notInstalled: return ("❌ 未安装", .orange)
+            case .stopped:      return ("⏸ 未启动", .secondary)
+            case .starting:     return ("⏳ 启动中…", .blue)
+            case .ready:        return ("✅ 运行中", .green)
+            case .crashed:      return ("💥 崩了", .red)
+            }
+        }()
+        Text(text)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(color)
     }
 
     /// 上传 30s+ 音频 → ElevenLabs Voice Lab → 自动写回 voice_id。
@@ -473,32 +583,47 @@ struct SettingsView: View {
         }
     }
 
-    /// 当 TTS 开关打开且 key/voice_id 都有时返回 provider，否则 nil
+    /// 当 TTS 开关打开且对应 backend 配置齐全时返回 provider，否则 nil。
+    /// 在 backend 之间切换会自动走不同分支；两边的缓存因为 voiceKey 不同所以不会打架。
     static func makeTTSProvider() -> (any TTSProvider)? {
         let d = UserDefaults.standard
         guard d.bool(forKey: SettingsKeys.ttsEnabled) else { return nil }
-        let key = d.string(forKey: SettingsKeys.ttsAPIKey) ?? ""
-        let voice = d.string(forKey: SettingsKeys.ttsVoiceID) ?? ""
-        guard !key.trimmingCharacters(in: .whitespaces).isEmpty,
-              !voice.trimmingCharacters(in: .whitespaces).isEmpty
-        else { return nil }
-        let model = d.string(forKey: SettingsKeys.ttsModel) ?? "eleven_multilingual_v2"
-        let stability = (d.object(forKey: SettingsKeys.ttsStability) as? Double) ?? 0.5
-        let similarity = (d.object(forKey: SettingsKeys.ttsSimilarity) as? Double) ?? 0.75
-        let base = ElevenLabsTTS(
-            apiKey: key,
-            voiceID: voice,
-            modelID: model,
-            stability: stability,
-            similarityBoost: similarity
-        )
-        // 同样的文本 + 同样的音色参数命中缓存，免去重复在线合成。
-        let voiceKey = "\(voice)|\(model)|s=\(stability)|b=\(similarity)"
-        return CachingTTSProvider(
-            inner: base,
-            cacheDir: AppPaths.ttsCacheDir,
-            voiceKey: voiceKey
-        )
+        let backend = TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "")
+            ?? .elevenlabs
+
+        switch backend {
+        case .elevenlabs:
+            let key = d.string(forKey: SettingsKeys.ttsAPIKey) ?? ""
+            let voice = d.string(forKey: SettingsKeys.ttsVoiceID) ?? ""
+            guard !key.trimmingCharacters(in: .whitespaces).isEmpty,
+                  !voice.trimmingCharacters(in: .whitespaces).isEmpty
+            else { return nil }
+            let model = d.string(forKey: SettingsKeys.ttsModel) ?? "eleven_multilingual_v2"
+            let stability = (d.object(forKey: SettingsKeys.ttsStability) as? Double) ?? 0.5
+            let similarity = (d.object(forKey: SettingsKeys.ttsSimilarity) as? Double) ?? 0.75
+            let base = ElevenLabsTTS(
+                apiKey: key,
+                voiceID: voice,
+                modelID: model,
+                stability: stability,
+                similarityBoost: similarity
+            )
+            let voiceKey = "elevenlabs|\(voice)|\(model)|s=\(stability)|b=\(similarity)"
+            return CachingTTSProvider(
+                inner: base,
+                cacheDir: AppPaths.ttsCacheDir,
+                voiceKey: voiceKey
+            )
+
+        case .bertVITS2Local:
+            let inner = LocalBertVITS2TTS()
+            // 跟 ElevenLabs 缓存不打架：voiceKey 加固定 prefix
+            return CachingTTSProvider(
+                inner: inner,
+                cacheDir: AppPaths.ttsCacheDir,
+                voiceKey: "bert-vits2-taffy-2.3"
+            )
+        }
     }
 }
 

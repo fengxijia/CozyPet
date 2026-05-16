@@ -30,6 +30,27 @@ public enum AppPaths {
         return dir
     }
 
+    /// 本地 Bert-VITS2 TTS 服务的安装目录（venv + Bert-VITS2 仓库 + Taffy checkpoint）。
+    /// `setup.sh` 会在此处建 venv / clone 仓库 / 下模型；App 不直接创建它，要等用户跑过安装脚本。
+    public static var ttsServerDir: URL {
+        supportDir.appendingPathComponent("tts-server", isDirectory: true)
+    }
+
+    /// `server.py` 实际位置 —— setup.sh 把它复制进 Bert-VITS2/ 根目录里跑。
+    public static var ttsServerScript: URL {
+        ttsServerDir.appendingPathComponent("Bert-VITS2/server.py")
+    }
+
+    /// venv 里的 python（用它启 server.py，省得用户在 Settings 里手填路径）。
+    public static var ttsServerVenvPython: URL {
+        ttsServerDir.appendingPathComponent("venv/bin/python")
+    }
+
+    /// Python 子进程的日志文件，方便排查启动失败。
+    public static var ttsServerLog: URL {
+        ttsServerDir.appendingPathComponent("server.log")
+    }
+
     public static func todayDoneKey(date: Date = .init()) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"

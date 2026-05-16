@@ -44,6 +44,7 @@ public enum TTSError: Error, LocalizedError {
     case missingVoiceID
     case http(Int, String)
     case empty
+    case serverNotRunning
 
     public var errorDescription: String? {
         switch self {
@@ -51,6 +52,7 @@ public enum TTSError: Error, LocalizedError {
         case .missingVoiceID: "TTS voice id 没配"
         case .http(let code, let body): "TTS HTTP \(code): \(body)"
         case .empty: "TTS 返回为空"
+        case .serverNotRunning: "本地 TTS 服务没启动 —— 去 设置→语音 看一下"
         }
     }
 }
