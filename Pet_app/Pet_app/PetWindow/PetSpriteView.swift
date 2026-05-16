@@ -105,6 +105,10 @@ struct PetSpriteView: View {
         var list: [String] = []
         if !pickedAssetName.isEmpty { list.append(pickedAssetName) }
         list.append("\(prefix)-\(mood)")
+        // 困惑没有自己的 gif 时，借用 think 的（思考表情）而不是 idle —— 表情上更接近
+        if state.mood == .confused {
+            list.append("\(prefix)-think")
+        }
         list.append("\(prefix)-idle")
         list.append("pet-\(mood)")
         list.append("pet-idle")
@@ -187,6 +191,7 @@ struct PetSpriteView: View {
         case .cheer: 1.10
         case .sad: 0.95
         case .sleep: 0.92
+        case .think: 0.9
         case .confused: 1.0
         default: 1.0
         }
