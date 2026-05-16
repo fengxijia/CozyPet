@@ -176,6 +176,7 @@ struct PetSpriteView: View {
         case .cheer: "✨"
         case .angry: "😡"
         case .love: "💗"
+        case .daze: "😶‍🌫️"
         case .sleep: "💤"
         }
     }

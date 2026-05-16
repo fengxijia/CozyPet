@@ -12,6 +12,9 @@ public enum PetMood: String, CaseIterable, Sendable {
     case cheer
     case angry
     case love
+    /// idle 过 `dazeAfterIdleSeconds` 后自动进入；再过一段进入 .sleep。
+    /// 由看门狗触发，聊天回复的 [mood:xxx] 标签里 *不* 出现，避免 LLM 主动用它。
+    case daze
     case sleep
 
     public var label: String {
@@ -25,6 +28,7 @@ public enum PetMood: String, CaseIterable, Sendable {
         case .cheer: "开心"
         case .angry: "生气"
         case .love: "比心"
+        case .daze: "出神"
         case .sleep: "打瞌睡"
         }
     }
@@ -37,8 +41,10 @@ final class PetStateMachine {
     var bubbleText: String? = nil
     var bubbleVisible: Bool = false
 
-    /// 60 秒没人理就打瞌睡
-    var sleepAfterIdleSeconds: Double = 60
+    /// idle 持续超过这个秒数 → 切到 daze（"出神"，介于 idle 和 sleep 之间的中间态）
+    var dazeAfterIdleSeconds: Double = 30
+    /// 从最后一次交互算起超过这个秒数 → 切到 sleep（不管中间停在 idle 还是 daze）
+    var sleepAfterIdleSeconds: Double = 90
     private var lastInteraction: Date = .now
     private var idleWatchdog: Task<Void, Never>?
     /// 当前 say() 的「该不该隐藏气泡」倒计时；新 say() 进来就 cancel 旧的
@@ -127,10 +133,11 @@ final class PetStateMachine {
         }
     }
 
-    /// 每次交互（点桌宠 / 发消息 / 打开面板）调用，重置打瞌睡计时
+    /// 每次交互（点桌宠 / 发消息 / 打开面板）调用，重置打瞌睡计时。
+    /// 不论当前停在 daze 还是 sleep，都先回到 idle，让后续 say() 自己再切表情。
     func noteInteraction() {
         lastInteraction = .now
-        if mood == .sleep { mood = .idle }
+        if mood == .sleep || mood == .daze { mood = .idle }
     }
 
     func cycleMood() {
@@ -146,7 +153,10 @@ final class PetStateMachine {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self else { return }
                 let elapsed = Date.now.timeIntervalSince(self.lastInteraction)
-                if self.mood == .idle, elapsed > self.sleepAfterIdleSeconds {
+                // 只把"被动 idle / daze"升级到下一档；用户主动设的 talk / cheer / 等不动它。
+                if self.mood == .idle, elapsed > self.dazeAfterIdleSeconds {
+                    self.mood = .daze
+                } else if self.mood == .daze, elapsed > self.sleepAfterIdleSeconds {
                     self.mood = .sleep
                 }
             }
