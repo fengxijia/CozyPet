@@ -1,6 +1,19 @@
 # CozyPet
 
-一只浮在 macOS 桌面上的小宠物，陪你写代码、提醒喝水、念几句强心的话。
+打开电脑 脑袋空空 什么都不想做？
+每天都要重复打开一样的软件和网页，
+看到就心烦？
+———
+macOS 超治愈桌宠 + 工作流管理软件 CozyPet 来力！！
+
+✨ 开机自动弹出你喜欢的角色，原音色读出当天工作流
+
+✨ 一键启动每日必开的软件和网页，再也不用每天挨个点开一样的软件
+
+✨ 更有自定义便签时刻鼓励自己，帮你减轻痛苦，开启新的一天
+
+快来试试吧 😛
+
 
 > 起因：作者最近压力大、记性差，打开电脑常脑子一片空白，
 > 就给自己造了只桌宠负责开屏催活、按 todo 提醒、心情差时陪聊。
@@ -9,11 +22,11 @@
 
 ## 它会做什么
 
-- **浮窗桌宠** — 透明无边框 NSWindow，跨 Space / 跨全屏跟着你；可拖、可切换「完整 / 仅图标 / 隐藏」三种显示形态
-- **今日工作流** — YAML 描述的 todo 列表，点一下启动对应 app / 网址 / 文件夹；首次打开自动念一遍清单
-- **爱心便签** — 跟 todo 完全分开的一块小区域，写给自己的鼓励 / 提醒。可拖动排序、可调整与 todo 的高度占比、可点喇叭依次念出来，被打断后续读
-- **桌宠聊天** — 桌宠脚下一行小输入条，回车直接发 Claude，流式打字回在头顶气泡里；persona 走 prompt caching
-- **语音克隆** — 接 ElevenLabs，可以在设置里上传一段你想要的音色样本一键克隆，桌宠说话直接换你给的音色；同一段文字带磁盘缓存，再念就不走网络
+- **大大减轻工作的痛苦** — 不用动脑！开机即可看到你喜欢的角色！用角色的声音告诉你每天要做的事 跨应用 跨屏幕 随时陪伴你！
+- **桌宠聊天** — 不想工作？不想学习？心情不好？来和桌宠聊天吧～原生自带taffy/doro 桌宠，可切换多个形象，开启语音回复即可用原角色声线对话，仿佛ta就在你身边！
+- **今日工作流** — 可编辑的每日工作流列表，常用网站/软件一键导入，点启动键即可一键打开该任务所需的所有网站/软件；首次打开会自动用角色声线念一遍清单
+- **爱心便签** — 前一天振作的原因，第二天就忘记？把对自己的 鼓励 / 感悟 / 安慰都写在便签里吧！每天起来提醒一遍！可以让桌面宠物念出来！
+- **语音克隆** — 接 ElevenLabs，可以在设置里上传一段你想要的音色样本一键克隆，桌宠直接变成你给的音色！
 
 ---
 
@@ -29,6 +42,8 @@
 > 第一次开启 Claude 聊天和 ElevenLabs 语音不需要自己申请 API key —— 默认走作者维护的代理服务，
 > 共享速率限制内随便用。要切换到自己的 key 也可以，进 设置 → 对话 / 语音 改 Base URL 就行。
 > 代理服务端代码在 [`proxy-server/`](./proxy-server/)，自部署说明在它的 README。
+>
+> 不想用云端 TTS / 想完全离线？设置 → 语音 切到「本地 Bert-VITS2」，按 [`tts-server/README.md`](./tts-server/README.md) 跑一次 `setup.sh` 拉模型权重就行。
 
 ---
 
@@ -61,9 +76,9 @@ Xcode 打开后第一次会自动拉 SwiftPM 依赖（Yams、SDWebImage），等
 
 | Tab | 干嘛的 |
 |---|---|
-| 宠物 | 切换桌宠形象、改名字 |
+| 宠物 | 切换桌宠形象（Taffy / Doro）、改名字 |
 | 对话 | 贴 Anthropic API key（去 console.anthropic.com 申请）；选 Claude 模型 |
-| 语音 | 贴 ElevenLabs key + voice ID；或上传音频克隆音色 |
+| 语音 | 选 TTS 后端 —— ElevenLabs（贴 key + voice ID，或上传音频克隆）/ 本地 Bert-VITS2（首次需要跑 `tts-server/setup.sh` 拉模型权重） |
 | 常规 | 自启动、persona 文件路径 |
 
 都不填也能跑，只是桌宠只会显示气泡不会念出来。
@@ -79,7 +94,8 @@ workflow.yaml   — 今日工作流，每条 step 改 say + open_url / open_app 
 pets.yaml       — 多只宠物的元数据（图片前缀、名字）
 notes.json      — 爱心便签（一般通过 UI 改）
 persona.yaml    — 桌宠对话人格，热重载（改完不用重开 app）
-tts-cache/      — ElevenLabs 合成结果的本地缓存（删掉会重新走网络）
+tts-cache/      — 双后端共用的合成结果缓存，按「文本 + 音色」哈希（删掉会重新走网络 / 重新推理）
+tts-server/     — 本地 Bert-VITS2 sidecar 的安装目录（首次跑 setup.sh 后才存在）
 ```
 
 `workflow.yaml` 的 step 长这样：
@@ -111,9 +127,10 @@ Pet_app/                  Xcode 项目（UI + AppKit 胶水）
     Workflow/             工作流面板、爱心便签、step 启动器
     Chat/                 聊天 popover + 桌宠脚下输入条
     Settings/             四 tab 设置窗
-    Voice/                ElevenLabs 播放
+    Voice/                NSSound 播放 + 本地 Bert-VITS2 子进程生命周期管理
     System/               NSWorkspace 启动 app / URL / 文件夹
   Resources/              默认 workflow / persona YAML
+tts-server/               可选的本地 TTS sidecar：FastAPI + Bert-VITS2 v2.3
 ```
 
 桌宠跨 Space + 跨全屏靠 NSWindow.collectionBehavior 的 `.canJoinAllSpaces + .fullScreenAuxiliary`；
