@@ -79,16 +79,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
-    /// SDWebImage 用 URL 字符串当 cache key —— 我们的桌宠 GIF 在 bundle 里
-    /// `cp` 覆盖文件后路径不变，缓存就会一直返回旧帧。每次启动主动失效一下，
-    /// 这样换图后只需重启 app 就能看到新表情。
+    /// SDWebImage 用 URL 字符串当 cache key —— 桌宠 GIF 无论在 bundle 还是用户自定义目录里，
+    /// 覆盖文件后路径不变，缓存就会一直返回旧帧。每次启动主动失效一下，
+    /// 这样换图后只需重启 app 就能看到新表情。用户在 Settings 里换图则走单 key 即时失效。
     private func invalidatePetGifCache() {
-        guard let dir = Bundle.main.resourceURL else { return }
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: nil
-        )) ?? []
         let cache = SDImageCache.shared
-        for url in urls where url.pathExtension.lowercased() == "gif" {
+        if let dir = Bundle.main.resourceURL {
+            let urls = (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil
+            )) ?? []
+            for url in urls where url.pathExtension.lowercased() == "gif" {
+                cache.removeImage(forKey: url.absoluteString, fromDisk: true)
+            }
+        }
+        // 用户自定义形象（~/Library/Application Support/Pet/sprites/<prefix>/）也要清。
+        for url in PetSprites.allUserSpriteURLs() {
             cache.removeImage(forKey: url.absoluteString, fromDisk: true)
         }
         cache.clearMemory()

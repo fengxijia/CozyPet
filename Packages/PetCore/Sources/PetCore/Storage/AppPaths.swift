@@ -30,6 +30,22 @@ public enum AppPaths {
         return dir
     }
 
+    /// 所有用户自定义形象的根目录 —— 遍历清缓存时用。
+    public static var spritesRootDir: URL {
+        supportDir.appendingPathComponent("sprites", isDirectory: true)
+    }
+
+    /// 某只宠物的用户自定义形象目录：`~/Library/Application Support/Pet/sprites/<prefix>/`。
+    /// 目录已按 assetPrefix 分好，内部文件名只用 mood（idle.gif / cheer.gif / cheer-2.gif），
+    /// 不重复 prefix。`create` 默认建目录；只读探测时传 false。
+    public static func spritesDir(prefix: String, create: Bool = true) -> URL {
+        let dir = spritesRootDir.appendingPathComponent(prefix, isDirectory: true)
+        if create {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
     /// 本地 Bert-VITS2 TTS 服务的安装目录（venv + Bert-VITS2 仓库 + Taffy checkpoint）。
     /// `setup.sh` 会在此处建 venv / clone 仓库 / 下模型；App 不直接创建它，要等用户跑过安装脚本。
     public static var ttsServerDir: URL {

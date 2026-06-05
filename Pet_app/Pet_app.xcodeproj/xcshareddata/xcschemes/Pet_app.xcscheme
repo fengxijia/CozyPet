@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "4E6C6D482FAE13E900393352"
-               BuildableName = "Pet_app.app"
+               BuildableName = "CozyPet.app"
                BlueprintName = "Pet_app"
                ReferencedContainer = "container:Pet_app.xcodeproj">
             </BuildableReference>
@@ -46,7 +46,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "4E6C6D482FAE13E900393352"
-            BuildableName = "Pet_app.app"
+            BuildableName = "CozyPet.app"
             BlueprintName = "Pet_app"
             ReferencedContainer = "container:Pet_app.xcodeproj">
          </BuildableReference>
@@ -63,7 +63,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "4E6C6D482FAE13E900393352"
-            BuildableName = "Pet_app.app"
+            BuildableName = "CozyPet.app"
             BlueprintName = "Pet_app"
             ReferencedContainer = "container:Pet_app.xcodeproj">
          </BuildableReference>

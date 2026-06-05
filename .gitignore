@@ -30,3 +30,6 @@ proxy-server/node_modules/
 # Built release zips
 dist/
 
+
+# Built DMG / release artifacts
+*.dmg

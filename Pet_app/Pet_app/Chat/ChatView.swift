@@ -164,6 +164,10 @@ struct ChatView: View {
     /// 由 AppDelegate 注入，跟桌宠下面的 InlineChatBar 共用同一份对话历史。
     @ObservedObject var model: ChatModel
 
+    /// 当前正在朗读哪条 assistant 消息（按 displayMessages 索引），nil = 没在念
+    @State private var readingIndex: Int?
+    @State private var ttsAlert: String?
+
     init(state: PetStateMachine, petStore: PetStore, voice: VoicePlayer, model: ChatModel) {
         self.state = state
         self.petStore = petStore
@@ -177,8 +181,14 @@ struct ChatView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(Array(model.displayMessages.enumerated()), id: \.offset) { idx, msg in
-                            MessageBubble(message: msg, assetPrefix: petStore.active.assetPrefix)
-                                .id(idx)
+                            MessageBubble(
+                                message: msg,
+                                assetPrefix: petStore.active.assetPrefix,
+                                canRead: canRead(at: idx, message: msg),
+                                isReading: readingIndex == idx,
+                                onToggleRead: { toggleRead(at: idx, text: msg.content) }
+                            )
+                            .id(idx)
                         }
                     }
                     .padding()
@@ -232,23 +242,81 @@ struct ChatView: View {
             }
             .padding(8)
         }
+        .alert("还没配置 TTS", isPresented: Binding(
+            get: { ttsAlert != nil },
+            set: { if !$0 { ttsAlert = nil } }
+        )) {
+            Button("好") { ttsAlert = nil }
+        } message: {
+            Text(ttsAlert ?? "")
+        }
+        .onChange(of: voice.isPlaying) { _, playing in
+            // 用户从输入栏 / 桌宠那边的 cancel，也把按钮状态收回去
+            if !playing { readingIndex = nil }
+        }
+    }
+
+    /// 只有"已经成型的 assistant 回复"能朗读 —— 排除用户消息和正在 streaming 的临时尾巴。
+    private func canRead(at idx: Int, message: LLMMessage) -> Bool {
+        guard message.role == .assistant else { return false }
+        let isStreamingTail = !model.streaming.isEmpty && idx == model.displayMessages.count - 1
+        return !isStreamingTail
+    }
+
+    private func toggleRead(at idx: Int, text: String) {
+        if readingIndex == idx {
+            voice.cancel()        // 让 state.say 的 onFinish(false) 把 readingIndex 收回
+            return
+        }
+        guard SettingsView.makeTTSProvider() != nil else {
+            ttsAlert = "请先到 设置 → 语音 打开「说话时念出来」并选好 TTS 后端（ElevenLabs 或本地 Bert-VITS2）。"
+            return
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        readingIndex = idx
+        state.say(trimmed, mood: state.mood, autoHideAfter: 30) { _ in
+            // 被另一条抢走时 readingIndex 已经被改成新 idx —— 只在还是自己时清掉
+            if readingIndex == idx {
+                readingIndex = nil
+            }
+        }
     }
 }
 
 private struct MessageBubble: View {
     let message: LLMMessage
     let assetPrefix: String
+    var canRead: Bool = false
+    var isReading: Bool = false
+    var onToggleRead: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             if message.role == .assistant {
                 avatar
-                bubble.frame(maxWidth: .infinity, alignment: .leading)
+                HStack(alignment: .center, spacing: 6) {
+                    bubble
+                    if canRead { speakerButton }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Spacer(minLength: 40)
                 bubble
             }
         }
+    }
+
+    private var speakerButton: some View {
+        Button(action: onToggleRead) {
+            Image(systemName: isReading ? "stop.circle.fill" : "speaker.wave.2.fill")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isReading ? Color.accentColor : Color.secondary)
+                .padding(6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isReading ? "停止朗读" : "让桌宠念这句")
     }
 
     private var avatar: some View {

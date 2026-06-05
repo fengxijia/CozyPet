@@ -10,9 +10,10 @@ struct PetSpriteView: View {
     let onTap: () -> Void
 
     @State private var bobbing: CGFloat = 0
-    /// 当前 mood 抽到的具体变体资源名（doro-cheer-2 之类）。空串表示还没抽过。
-    /// 只在 mood 切换或激活宠物切换时重抽，避免每次 re-render 都换图导致闪烁。
-    @State private var pickedAssetName: String = ""
+    /// 当前 mood 抽到的具体变体（用户自定义 file URL 或 bundle 资源）。nil 表示还没抽过。
+    /// 只在 mood 切换 / 激活宠物切换 / 收到 .petSpritesChanged 时重抽，
+    /// 避免每次 re-render 都换图导致闪烁。
+    @State private var pickedSource: SpriteSource?
 
     var body: some View {
         switch app.displayMode {
@@ -94,46 +95,60 @@ struct PetSpriteView: View {
         }
     }
 
-    /// 资源名候选顺序：
-    /// 1. 当前 mood 抽到的变体（doro-cheer-2）—— 由 `pickedAssetName` 决定，mood 不变就不变
-    /// 2. 当前宠物 + 当前 mood 的主图（doro-cheer）
-    /// 3. 当前宠物 + idle（doro-idle）
-    /// 4. 全局 + 当前 mood（pet-cheer）
-    /// 5. 全局 + idle（pet-idle）
+    /// 解析一个 (prefix, mood) 到可加载资源：先查用户自定义目录（file URL），
+    /// 再回退到 bundle 的 `<prefix>-<mood>`（GIF 文件或 asset catalog 位图）。
+    private func resolve(prefix: String, mood: String) -> SpriteSource? {
+        if let url = PetSprites.customSpriteURL(prefix: prefix, mood: mood) {
+            return .gif(url)
+        }
+        return resolveSprite(name: "\(prefix)-\(mood)")
+    }
+
+    /// pickedSource 没命中时的回退链：
+    /// 1. 当前宠物 + 当前 mood（用户图优先，其次 bundle）
+    /// 2. confused 借 think 的表情
+    /// 3. 当前宠物 + idle
+    /// 4. 全局 pet-<mood>
+    /// 5. 全局 pet-idle
     /// 全没就 emoji。
-    private var assetCandidates: [String] {
+    private var fallbackCandidates: [SpriteSource] {
         let prefix = petStore.active.assetPrefix
         let mood = state.mood.rawValue
-        var list: [String] = []
-        if !pickedAssetName.isEmpty { list.append(pickedAssetName) }
-        list.append("\(prefix)-\(mood)")
-        // 困惑没有自己的 gif 时，借用 think 的（思考表情）而不是 idle —— 表情上更接近
-        if state.mood == .confused {
-            list.append("\(prefix)-think")
-        }
-        list.append("\(prefix)-idle")
-        list.append("pet-\(mood)")
-        list.append("pet-idle")
+        var list: [SpriteSource] = []
+        if let s = resolve(prefix: prefix, mood: mood) { list.append(s) }
+        // 困惑没有自己的图时，借 think（思考表情）而不是 idle —— 表情上更接近
+        if state.mood == .confused, let s = resolve(prefix: prefix, mood: "think") { list.append(s) }
+        if let s = resolve(prefix: prefix, mood: "idle") { list.append(s) }
+        if let s = resolve(prefix: "pet", mood: mood) { list.append(s) }
+        if let s = resolve(prefix: "pet", mood: "idle") { list.append(s) }
         return list
     }
 
-    /// 给当前 (active pet, mood) 抽一个变体。优先扫 `prefix-mood`、`prefix-mood-2` … `prefix-mood-5`，
-    /// 在 bundle 里实际存在的几个里随机挑一个。没扫到就置空，让 `assetCandidates` 走主图 fallback。
+    /// 给当前 (active pet, mood) 抽一个变体。用户给了图就只在用户变体里抽
+    /// （用户自定义全胜，不混 bundle）；否则扫 bundle 的 `<prefix>-<mood>`、`-2`…`-5`。
+    /// 没抽到就置 nil，让 fallbackCandidates 兜底。
     private func repickVariant() {
         let prefix = petStore.active.assetPrefix
         let mood = state.mood.rawValue
-        var existing: [String] = []
+        let userURLs = PetSprites.userSpriteURLs(prefix: prefix, mood: mood)
+        if !userURLs.isEmpty {
+            pickedSource = userURLs.randomElement().map(SpriteSource.gif)
+            return
+        }
+        var bundle: [SpriteSource] = []
         for n in 1...5 {
             let name = n == 1 ? "\(prefix)-\(mood)" : "\(prefix)-\(mood)-\(n)"
-            if resolveSprite(name: name) != nil {
-                existing.append(name)
+            if let url = Bundle.main.url(forResource: name, withExtension: "gif") {
+                bundle.append(.gif(url))
+            } else if NSImage(named: name) != nil {
+                bundle.append(.asset(name))
             }
         }
-        pickedAssetName = existing.randomElement() ?? ""
+        pickedSource = bundle.randomElement()
     }
 
-    /// 把名字解析为可加载的资源：先找 bundle 里的 GIF（作为普通文件，actool 不支持 GIF），
-    /// 再回退到 asset catalog 里的位图。
+    /// 资源来源：bundle GIF 文件 / 用户自定义 file URL（都走 `.gif`，`AnimatedImage(url:)` 通吃
+    /// GIF / PNG / WebP），或 asset catalog 位图（`.asset`）。
     private enum SpriteSource {
         case gif(URL)
         case asset(String)
@@ -151,7 +166,8 @@ struct PetSpriteView: View {
 
     @ViewBuilder
     private var spriteForCurrentMood: some View {
-        let resolved = assetCandidates.lazy.compactMap(resolveSprite(name:)).first
+        // pickedSource 命中就直接用（`??` 短路，不必构建整条回退链）。
+        let resolved = pickedSource ?? fallbackCandidates.first
         Group {
             switch resolved {
             case .gif(let url):
@@ -169,6 +185,7 @@ struct PetSpriteView: View {
         .onAppear { repickVariant() }
         .onChange(of: state.mood) { _, _ in repickVariant() }
         .onChange(of: petStore.roster.active) { _, _ in repickVariant() }
+        .onReceive(NotificationCenter.default.publisher(for: .petSpritesChanged)) { _ in repickVariant() }
     }
 
     private var placeholder: String {

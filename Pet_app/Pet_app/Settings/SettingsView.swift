@@ -1,4 +1,5 @@
 import AppKit
+import SDWebImage
 import SwiftUI
 import UniformTypeIdentifiers
 import PetCore
@@ -30,6 +31,8 @@ enum TTSBackend: String, CaseIterable {
 /// Settings 里切了 TTS backend 之后发这个；AppDelegate 监听后决定 start / stop Python server。
 extension Notification.Name {
     static let ttsBackendChanged = Notification.Name("pet.tts.backendChanged")
+    /// 用户在 Settings 里换 / 删了自定义形象后发这个；浮动桌宠窗口监听后重抽当前 mood 的图。
+    static let petSpritesChanged = Notification.Name("pet.sprites.changed")
 }
 
 enum SettingsKeys {
@@ -88,6 +91,11 @@ struct SettingsView: View {
     @State private var showOpenAIKey: Bool = false
     @State private var showTTSKey: Bool = false
     @State private var newPetName: String = ""
+
+    // —— 自定义形象相关状态
+    @State private var spriteImportError: String?
+    /// 换 / 删图后自增，强制形象区重算各状态的「已自定义 / 内置 / 缺」标签。
+    @State private var spriteRefreshToken: Int = 0
 
     // —— 自启动状态（每次 onAppear 刷新一次；切换后也刷新）
     @State private var loginItemEnabled: Bool = false
@@ -225,7 +233,7 @@ struct SettingsView: View {
     private var petsSection: some View {
         Section("宠物档案") {
             HStack {
-                Picker("当前", selection: Binding(
+                Picker("当前宠物", selection: Binding(
                     get: { petStore.roster.active },
                     set: { petStore.setActive(id: $0) }
                 )) {
@@ -242,17 +250,24 @@ struct SettingsView: View {
                 .disabled(petStore.roster.pets.count <= 1)
             }
 
-            HStack {
-                TextField("新宠物名字（如 mochi）", text: $newPetName)
-                    .textFieldStyle(.roundedBorder)
-                Button("新建") {
-                    let trimmed = newPetName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    _ = petStore.addNew(name: trimmed)
-                    newPetName = ""
+            // —— 新建一只全新的宠物（建完自动切过去）
+            VStack(alignment: .leading, spacing: 4) {
+                Text("新建宠物").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("名字（如 mochi）", text: $newPetName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { createPet() }
+                    Button("新建并切换") { createPet() }
+                        .disabled(newPetName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                .disabled(newPetName.trimmingCharacters(in: .whitespaces).isEmpty)
+                Text("建好后会自动切到这只新宠物，再到下面「形象」区给它逐个状态导入 GIF / 图片。")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            // —— 以下都是在编辑「当前激活」的那只宠物
+            Text("编辑「\(petStore.active.name)」").font(.caption).foregroundStyle(.secondary)
 
             TextField("名字", text: Binding(
                 get: { petStore.active.name },
@@ -265,9 +280,11 @@ struct SettingsView: View {
                 Text(petStore.active.assetPrefix)
                     .font(.system(.caption, design: .monospaced))
                 Spacer()
-                Text("Assets 名：\(petStore.active.assetPrefix)-idle / -talk / -think / -sleep ...")
+                Text("内置 Assets 名：\(petStore.active.assetPrefix)-idle / -talk …（没有就用下面导入的）")
                     .font(.caption2).foregroundStyle(.secondary)
             }
+
+            spriteCustomizer
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Persona（system prompt）").font(.caption).foregroundStyle(.secondary)
@@ -283,6 +300,126 @@ struct SettingsView: View {
             Text("档案文件：\(AppPaths.petsFile.path)")
                 .font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    /// 当前宠物的自定义形象区：逐状态选图 + 打开素材文件夹 + 刷新。
+    /// 折叠在 DisclosureGroup 里，11 个状态不至于把宠物档案撑得太长。
+    private var spriteCustomizer: some View {
+        DisclosureGroup("形象（每个状态一张动图）") {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Button("打开素材文件夹") { openSpriteFolder() }
+                    Button("刷新") { refreshSprites() }
+                    Spacer()
+                }
+                Text("每一行：🔍 浏览器搜「角色 + 状态」的 GIF（保存到本机再回来导入）；「选图…」从本机导入。文件名规则：idle.gif / cheer.gif…，变体加 -2…-5。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                if let err = spriteImportError {
+                    Text(err).font(.caption2).foregroundStyle(.red)
+                }
+                ForEach(PetMood.allCases, id: \.self) { mood in
+                    spriteRow(mood)
+                }
+            }
+            .id(spriteRefreshToken)   // 换图后强制重算下面各行状态
+        }
+    }
+
+    private func spriteRow(_ mood: PetMood) -> some View {
+        let prefix = petStore.active.assetPrefix
+        let isCustom = PetSprites.customSpriteURL(prefix: prefix, mood: mood.rawValue) != nil
+        let hasBundle = bundleSpriteExists(prefix: prefix, mood: mood.rawValue)
+        return HStack(spacing: 8) {
+            Text(mood.label).frame(width: 52, alignment: .leading)
+            if isCustom {
+                Text("已自定义").foregroundStyle(.green)
+            } else if hasBundle {
+                Text("内置").foregroundStyle(.secondary)
+            } else {
+                Text("缺").foregroundStyle(.orange)
+            }
+            Spacer()
+            Button {
+                searchGifInBrowser(for: mood)
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .help("浏览器搜「\(petStore.active.name) \(mood.label) gif」(动图),找到合适的存下来再点旁边「选图…」导入")
+            Button(isCustom ? "换图…" : "选图…") { pickSprite(for: mood) }
+            if isCustom {
+                Button {
+                    PetSprites.removeUserSprites(prefix: prefix, mood: mood.rawValue)
+                    refreshSprites()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .help("删掉自定义，恢复内置")
+            }
+        }
+        .font(.caption)
+    }
+
+    /// 拼「宠物名 + 状态 + gif」给 Google Images,带 `itp:animated` 滤掉静态图。
+    /// 不在 app 里嵌搜索 UI / 调 API —— 用户右键存图后回来点「选图…」即可。
+    /// 中文 / 英文 / 混搜都吃,UTF-8 percent-encoding 走 urlQueryAllowed。
+    private func searchGifInBrowser(for mood: PetMood) {
+        let petName = petStore.active.name.trimmingCharacters(in: .whitespaces)
+        let query = "\(petName) \(mood.label) gif"
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let urlStr = "https://www.google.com/search?q=\(encoded)&tbm=isch&tbs=itp:animated"
+        if let url = URL(string: urlStr) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func createPet() {
+        let trimmed = newPetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        _ = petStore.addNew(name: trimmed)   // addNew 会自动把新宠物设为激活
+        newPetName = ""
+    }
+
+    private func bundleSpriteExists(prefix: String, mood: String) -> Bool {
+        let name = "\(prefix)-\(mood)"
+        if Bundle.main.url(forResource: name, withExtension: "gif") != nil { return true }
+        return NSImage(named: name) != nil
+    }
+
+    private func pickSprite(for mood: PetMood) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.gif, .png, .webP, .heic]
+        panel.title = "选「\(mood.label)」的动图"
+        panel.message = "选一张 GIF / PNG / WebP，会成为当前宠物「\(mood.label)」状态的形象。建议用会动的 GIF。"
+        guard panel.runModal() == .OK, let src = panel.url else { return }
+        do {
+            let dest = try PetSprites.importSprite(
+                from: src, prefix: petStore.active.assetPrefix, mood: mood.rawValue
+            )
+            SDImageCache.shared.removeImage(forKey: dest.absoluteString, fromDisk: true)
+            spriteImportError = nil
+            spriteRefreshToken += 1
+            NotificationCenter.default.post(name: .petSpritesChanged, object: nil)
+        } catch {
+            spriteImportError = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func openSpriteFolder() {
+        let dir = AppPaths.spritesDir(prefix: petStore.active.assetPrefix, create: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    private func refreshSprites() {
+        for url in PetSprites.allUserSpriteURLs() {
+            SDImageCache.shared.removeImage(forKey: url.absoluteString, fromDisk: true)
+        }
+        SDImageCache.shared.clearMemory()
+        spriteImportError = nil
+        spriteRefreshToken += 1
+        NotificationCenter.default.post(name: .petSpritesChanged, object: nil)
     }
 
     private var claudeSection: some View {
@@ -312,11 +449,11 @@ struct SettingsView: View {
             keyField(placeholder: "API Key", text: $openaiKey, visible: $showOpenAIKey)
             TextField("Base URL", text: $openaiBase)
                 .textFieldStyle(.roundedBorder)
-                .help("Gemini OpenAI 兼容：https://generativelanguage.googleapis.com/v1beta/openai/\nOpenAI 官方：https://api.openai.com/v1\nOllama 本地：http://localhost:11434/v1")
+                .help("Gemini OpenAI 兼容：https://generativelanguage.googleapis.com/v1beta/openai/\nOpenAI 官方：https://api.openai.com/v1\naihubmix：https://aihubmix.com/v1\nOllama 本地：http://localhost:11434/v1")
             HStack {
                 TextField("模型名", text: $openaiModel)
                     .textFieldStyle(.roundedBorder)
-                    .help("Gemini: gemini-2.5-flash / gemini-2.5-pro / gemini-2.0-flash\nOpenAI: gpt-5 / gpt-4o-mini\nOllama: llama3.1:8b 之类")
+                    .help("Gemini: gemini-2.5-flash / gemini-2.5-pro / gemini-2.0-flash\nOpenAI: gpt-5 / gpt-4o-mini\naihubmix 支持上面所有模型名\nOllama: llama3.1:8b 之类")
                 Menu("常用预设") {
                     Button("Gemini 2.5 Flash（快、便宜）") { openaiModel = "gemini-2.5-flash" }
                     Button("Gemini 2.5 Pro（强、贵）") { openaiModel = "gemini-2.5-pro" }
@@ -324,8 +461,37 @@ struct SettingsView: View {
                     Divider()
                     Button("GPT-5") { openaiModel = "gpt-5" }
                     Button("GPT-4o mini") { openaiModel = "gpt-4o-mini" }
+                    Divider()
+                    Section("aihubmix（一个 Key 多家模型）") {
+                        Button("aihubmix · Gemini 2.5 Pro") {
+                            openaiBase = "https://aihubmix.com/v1"
+                            openaiModel = "gemini-2.5-pro"
+                        }
+                        Button("aihubmix · Gemini 2.5 Flash") {
+                            openaiBase = "https://aihubmix.com/v1"
+                            openaiModel = "gemini-2.5-flash"
+                        }
+                        Button("aihubmix · Claude Sonnet 4.6") {
+                            openaiBase = "https://aihubmix.com/v1"
+                            openaiModel = "claude-sonnet-4-6"
+                        }
+                        Button("aihubmix · GPT-5") {
+                            openaiBase = "https://aihubmix.com/v1"
+                            openaiModel = "gpt-5"
+                        }
+                    }
                 }
                 .frame(width: 110)
+            }
+            HStack {
+                Spacer()
+                Button("前往 aihubmix 注册（一个 Key 用 Gemini/Claude/GPT）") {
+                    if let url = URL(string: "https://aihubmix.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.link)
+                .font(.caption)
             }
         }
     }
