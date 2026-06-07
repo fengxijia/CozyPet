@@ -23,6 +23,12 @@ public enum AppPaths {
         supportDir.appendingPathComponent("notes.json")
     }
 
+    /// 「保险箱」—— 网站 / 账号 / 密码等敏感小抄，跟便签彻底分开存。
+    /// 注意：v1 跟 API key 一样是明文落盘（纯个人本机使用）；v2 再迁 Keychain。
+    public static var vaultFile: URL {
+        supportDir.appendingPathComponent("vault.json")
+    }
+
     /// TTS 合成结果的磁盘缓存目录（per-text + voice 配置哈希成文件名）。
     public static var ttsCacheDir: URL {
         let dir = supportDir.appendingPathComponent("tts-cache", isDirectory: true)

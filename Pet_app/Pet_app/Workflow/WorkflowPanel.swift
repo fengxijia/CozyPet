@@ -161,6 +161,7 @@ struct WorkflowPanel: View {
     @ObservedObject var store: WorkflowStore
     @ObservedObject var voice: VoicePlayer
     @StateObject private var notesStore = NotesStore()
+    @StateObject private var vaultStore = VaultStore()
     /// 编辑器单独开一个浮动 NSWindow（而不是 .sheet）—— 这样可以拖到旁边，
     /// 不挡住后面的工作流面板。生命周期跟随 WorkflowPanel。
     @StateObject private var editorWindow = StepEditorWindow()
@@ -171,6 +172,12 @@ struct WorkflowPanel: View {
     /// 喇叭只看这个，避免便签播报时这边也跟着切图标。
     @State private var isReadingSteps: Bool = false
     @State private var ttsAlert: String?
+    /// 底部区域当前显示的标签 —— 爱心便签 / 保险箱，左对齐切换。
+    @State private var bottomTab: BottomTab = .notes
+
+    private enum BottomTab: Hashable {
+        case notes, vault
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -179,8 +186,8 @@ struct WorkflowPanel: View {
             VSplitView {
                 stepsArea
                     .frame(minHeight: 120)
-                NotesPanel(state: state, store: notesStore, voice: voice)
-                    .frame(minHeight: 80)
+                bottomTabArea
+                    .frame(minHeight: 120)
             }
             .frame(maxHeight: .infinity)
             Divider()
@@ -232,6 +239,44 @@ struct WorkflowPanel: View {
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// 底部：左对齐的标签栏 + 选中的面板。
+    private var bottomTabArea: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4) {
+                tabButton(.notes, title: "爱心便签", icon: "heart.text.square")
+                tabButton(.vault, title: "保险箱", icon: "lock.shield")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 6)
+            Divider()
+            switch bottomTab {
+            case .notes:
+                NotesPanel(state: state, store: notesStore, voice: voice)
+            case .vault:
+                VaultPanel(store: vaultStore)
+            }
+        }
+    }
+
+    private func tabButton(_ tab: BottomTab, title: String, icon: String) -> some View {
+        let selected = bottomTab == tab
+        return Button {
+            bottomTab = tab
+        } label: {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(selected ? Color.secondary.opacity(0.15) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var header: some View {
@@ -986,14 +1031,10 @@ private struct NotesPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Image(systemName: "heart.text.square")
-                    .foregroundStyle(.pink.opacity(0.7))
-                Text("爱心便签")
-                    .font(.subheadline.weight(.semibold))
+                Spacer()
                 Text("\(store.notes.count)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
                 Button {
                     toggleSpeak()
                 } label: {
