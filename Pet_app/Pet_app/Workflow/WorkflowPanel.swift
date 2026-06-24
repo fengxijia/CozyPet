@@ -275,9 +275,18 @@ struct WorkflowPanel: View {
                                 done: store.doneIDs.contains(step.id),
                                 onRun: { run(step) },
                                 onToggle: { store.toggle(step.id) },
-                                onEdit: { editorWindow.show(mode: .edit(original: step), store: store) },
-                                onArchive: { store.setArchived(id: step.id, true) },
-                                onDelete: { store.deleteStep(id: step.id) }
+                                onEdit: {
+                                    stopReadingSteps()
+                                    editorWindow.show(mode: .edit(original: step), store: store)
+                                },
+                                onArchive: {
+                                    stopReadingSteps()
+                                    store.setArchived(id: step.id, true)
+                                },
+                                onDelete: {
+                                    stopReadingSteps()
+                                    store.deleteStep(id: step.id)
+                                }
                             )
                         }
                         .onMove { offsets, dest in
@@ -452,6 +461,15 @@ struct WorkflowPanel: View {
         if !store.doneIDs.contains(step.id) {
             store.toggle(step.id)
         }
+    }
+
+    /// 开始编辑 / 归档 / 删除某步骤前，先把朗读停掉：
+    /// 否则一边念一边改同一段文字，List 行会随每个按键重渲染、跟朗读的状态推送相互踩踏，
+    /// 焦点抖动会把主线程卡死；下标也会错位。停掉再编辑，体验也更顺。
+    private func stopReadingSteps() {
+        guard isReadingSteps else { return }
+        isReadingSteps = false
+        voice.cancel()
     }
 
     private func toggleSpeakSteps() {
@@ -1225,7 +1243,11 @@ private struct NotesPanel: View {
                             ),
                             icon: note.icon,
                             onIconChange: { store.updateIcon(note.id, $0) },
-                            onDelete: { store.delete(note.id) }
+                            onDelete: {
+                                stopReadingNotes()
+                                store.delete(note.id)
+                            },
+                            onBeginEdit: { stopReadingNotes() }
                         )
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -1250,6 +1272,13 @@ private struct NotesPanel: View {
         .onChange(of: store.notes.map(\.id)) { _, _ in
             currentIndex = 0
         }
+    }
+
+    /// 进入便签编辑前停掉朗读：避免边念边改同一条便签时 TextField 重渲染抖动卡死。
+    private func stopReadingNotes() {
+        guard isReadingNotes else { return }
+        isReadingNotes = false
+        voice.cancel()
     }
 
     private func toggleSpeak() {
@@ -1296,6 +1325,8 @@ private struct NoteRow: View {
     let icon: String
     let onIconChange: (String) -> Void
     let onDelete: () -> Void
+    /// 进入编辑态前通知父视图（用来停掉正在进行的便签朗读，避免边念边改卡死）。
+    var onBeginEdit: () -> Void = {}
 
     @State private var isEditing = false
     @FocusState private var focused: Bool
@@ -1337,7 +1368,10 @@ private struct NoteRow: View {
                         .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { isEditing = true }
+                        .onTapGesture(count: 2) {
+                            onBeginEdit()
+                            isEditing = true
+                        }
                 }
             }
             .font(.system(size: 13))

@@ -163,7 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             && SettingsView.isTTSEnabled(d)
         guard usesLocal else { say(); return }
         Task { @MainActor in
-            for _ in 0..<40 {  // 40 × 0.5s = 20s 上限
+            // 上限 90s：实测冷启动加载 BERT 子模型要 30~40s，旧的 20s 上限会在模型还没
+            // ready 时就开口、整句静音。跟 LocalTTSServer 自己的 120s health 轮询对齐量级。
+            // 真 ready 会立刻 break，所以上限调高只影响"起不来"时的等待，没副作用。
+            for _ in 0..<180 {  // 180 × 0.5s = 90s 上限
                 switch LocalTTSServer.shared.status {
                 case .ready, .crashed, .notInstalled:
                     say(); return        // 就绪、或确定起不来了，别再干等
