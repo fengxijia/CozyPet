@@ -76,6 +76,9 @@ public struct WorkflowStep: Codable, Identifiable, Hashable, Sendable {
     /// 多动作。优先于 open_app / open_url / open_path 这些「老字段」。
     /// 老 yaml 没填这个 —— resolvedActions 会兜底用单动作字段构造一项。
     public var actions: [StepAction]?
+    /// 归档：暂时不需要、但以后可能再提回今日日程的步骤。
+    /// 可选，只在 true 时落盘；nil 即「未归档」，老 yaml 不受影响。读用 `isArchived`。
+    public var archived: Bool?
 
     public init(
         id: String,
@@ -85,7 +88,8 @@ public struct WorkflowStep: Codable, Identifiable, Hashable, Sendable {
         openPath: String? = nil,
         kind: StepKind? = nil,
         thenPrompt: String? = nil,
-        actions: [StepAction]? = nil
+        actions: [StepAction]? = nil,
+        archived: Bool? = nil
     ) {
         self.id = id
         self.say = say
@@ -95,15 +99,19 @@ public struct WorkflowStep: Codable, Identifiable, Hashable, Sendable {
         self.kind = kind
         self.thenPrompt = thenPrompt
         self.actions = actions
+        self.archived = archived
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, say, kind, actions
+        case id, say, kind, actions, archived
         case openApp = "open_app"
         case openURL = "open_url"
         case openPath = "open_path"
         case thenPrompt = "then_prompt"
     }
+
+    /// 是否已归档（不在今日列表显示 / 不朗读 / 不计进度）。
+    public var isArchived: Bool { archived ?? false }
 
     /// 单动作时给老 UI / runner 一个 best-guess 类型。多动作时返回第一项的 kind。
     public var resolvedKind: StepKind {

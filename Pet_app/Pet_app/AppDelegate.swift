@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// 这样所有桌宠 say() 都会自动走 TTS（开屏、提醒、聊天回复）。
     lazy var state: PetStateMachine = PetStateMachine(
         voice: voice,
-        ttsProviderFactory: { SettingsView.makeTTSProvider() }
+        ttsProviderFactory: { [petStore] in SettingsView.makeTTSProvider(for: petStore.active) }
     )
     /// 桌宠下面那条小输入框直接绑这个 ChatModel —— 跟菜单"和小宠聊天…"打开的历史
     /// 窗口共享同一份 messages，所以无论从哪里发的话上下文都连得上。
@@ -66,13 +66,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         syncLocalTTSServerWithSettings()
     }
 
-    /// 根据 UserDefaults 里的 backend 决定本地 server 起 / 停。
+    /// 声音是按宠物的，所以只要 TTS 开着、且名册里有任意一只宠物用到本地后端
+    /// （混合塔菲 / 纯本地，典型就是塔菲），就把本地 server 拉起来。
     private func syncLocalTTSServerWithSettings() {
         let d = UserDefaults.standard
-        let backend = TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "")
-            ?? .elevenlabs
-        let enabled = d.bool(forKey: SettingsKeys.ttsEnabled)
-        if backend == .bertVITS2Local && enabled {
+        let enabled = SettingsView.isTTSEnabled(d)
+        let anyPetUsesLocal = petStore.roster.pets.contains { pet in
+            let b = pet.resolvedVoiceBackend
+            return b == TTSBackend.bertVITS2Local.rawValue || b == TTSBackend.hybridTaffy.rawValue
+        }
+        if enabled && anyPetUsesLocal {
             LocalTTSServer.shared.startIfNeeded()
         } else {
             LocalTTSServer.shared.stop()
@@ -130,20 +133,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         if didReadWorkflowThisLaunch {
             // 这次启动已经念过了 —— 后续再开面板只说开场白，不再唠叨整条 todo。
-            state.say("今天先做这几件事～", mood: .remind, autoHideAfter: 30)
+            speakWhenTTSReady { [weak self] in
+                self?.state.say("今天先做这几件事～", mood: .cheer, autoHideAfter: 30)
+            }
             return
         }
         didReadWorkflowThisLaunch = true
-        let steps = workflowStore.workflow?.steps ?? []
-        state.say("今天先做这几件事～", mood: .remind, autoHideAfter: 30) { [weak self] natural in
-            guard natural else { return }
-            self?.readWorkflowSteps(steps, at: 0)
+        let steps = workflowStore.activeSteps
+        speakWhenTTSReady { [weak self] in
+            self?.state.say("今天先做这几件事～", mood: .cheer, autoHideAfter: 30) { natural in
+                guard natural else { return }
+                self?.readWorkflowSteps(steps, at: 0)
+            }
+        }
+    }
+
+    /// 本地 / 混合后端冷启动时，Bert-VITS2 模型要几秒才加载完。开场白等 server ready 再念，
+    /// 否则开机第一句会因为 server 还在 loading 而合成失败、变成静音。
+    /// 云端 backend 或没开 TTS 时立即念。最多等 20s，超时也照念（至少弹出气泡）。
+    private func speakWhenTTSReady(_ say: @escaping @MainActor () -> Void) {
+        let d = UserDefaults.standard
+        // 用「当前激活宠物」实际解析出的后端来判断要不要等本地 server —— say() 也是按 active pet
+        // 建 provider 的，二者必须一致；否则全局设成 ElevenLabs、但塔菲解析成本地/混合时，会跳过等待、
+        // 开场白照样打到还在 starting 的本地 server 而静音。
+        let backend = TTSBackend(rawValue: petStore.active.resolvedVoiceBackend)
+            ?? TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "")
+            ?? .hybridTaffy
+        let usesLocal = (backend == .bertVITS2Local || backend == .hybridTaffy)
+            && SettingsView.isTTSEnabled(d)
+        guard usesLocal else { say(); return }
+        Task { @MainActor in
+            for _ in 0..<40 {  // 40 × 0.5s = 20s 上限
+                switch LocalTTSServer.shared.status {
+                case .ready, .crashed, .notInstalled:
+                    say(); return        // 就绪、或确定起不来了，别再干等
+                default:
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            say()
         }
     }
 
     /// 念完一条工作流的 say，自然结束才接下一条；
     /// 用户中途点了启动 / 别的 state.say 抢走音频会拿到 natural=false，链式自动断掉。
-    /// 不切表情：有些 step 内容是凶 / 丧的，切 .talk 反而违和；保持当前表情即可。
+    /// 不切表情：有些 step 内容是凶 / 丧的，强行切表情反而违和；保持当前表情即可。
     private func readWorkflowSteps(_ steps: [WorkflowStep], at idx: Int) {
         guard idx < steps.count else { return }
         let line = steps[idx].say ?? steps[idx].id

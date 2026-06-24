@@ -2,9 +2,25 @@ import Combine
 import SwiftUI
 import PetCore
 
+/// 一条聊天记录 + 它的作者宠物。
+/// petID == nil → 用户消息（右侧气泡，不显示宠物头像）。
+/// assistant 消息记下当时是哪只宠物在说：切宠后旧消息仍显示原来的头像，
+/// 喂回 LLM 时也能把「别的宠物说过的话」标出来，避免新宠物串了性格。
+struct ChatEntry: Identifiable, Equatable {
+    let id: UUID
+    var message: LLMMessage
+    var petID: String?
+
+    init(id: UUID = UUID(), message: LLMMessage, petID: String? = nil) {
+        self.id = id
+        self.message = message
+        self.petID = petID
+    }
+}
+
 @MainActor
 final class ChatModel: ObservableObject {
-    @Published var messages: [LLMMessage] = []
+    @Published var entries: [ChatEntry] = []
     @Published var input: String = ""
     @Published var streaming: String = ""   // current partial assistant reply
     @Published var sending: Bool = false
@@ -21,12 +37,24 @@ final class ChatModel: ObservableObject {
         self.voice = voice
     }
 
-    var displayMessages: [LLMMessage] {
-        var all = messages
+    /// 展示用：历史 + 正在 streaming 的临时尾巴（作者 = 当前宠物）。
+    var displayEntries: [ChatEntry] {
+        var all = entries
         if !streaming.isEmpty {
-            all.append(.init(role: .assistant, content: streaming))
+            all.append(ChatEntry(
+                message: .init(role: .assistant, content: streaming),
+                petID: petStore.active.id
+            ))
         }
         return all
+    }
+
+    /// 某条消息作者宠物的资源前缀（找不到就退当前宠物）—— 用来取对应头像。
+    func assetPrefix(forPetID id: String?) -> String {
+        if let id, let p = petStore.roster.pets.first(where: { $0.id == id }) {
+            return p.assetPrefix
+        }
+        return petStore.active.assetPrefix
     }
 
     /// 让 LLM 在每次回复开头标一个 [mood:xxx]，由 ChatModel 解析后切换桌宠表情，
@@ -35,11 +63,8 @@ final class ChatModel: ObservableObject {
 
 【输出格式 — 必须严格遵守】
 每次回复都必须以 [mood:xxx] 这个标签开头，xxx 在以下列表里选最贴本次心情的一个：
-- idle 平静中性、闲聊
-- talk 一般说话
-- think 思考、犹豫、想想
-- confused 疑惑、无语、白眼
-- remind 提醒、温柔催促
+- idle 平静中性、一般说话、闲聊
+- think 思考、犹豫、疑惑、想想
 - sad 难过、伤心、委屈
 - cheer 开心、兴奋、欢笑、夸奖
 - angry 生气、不满、抗议
@@ -72,11 +97,42 @@ final class ChatModel: ObservableObject {
         return (mood, remainder)
     }
 
+    /// 把内存里的 entries 转成喂给 LLM 的 history。
+    /// 「别的宠物」说过的 assistant 消息前面标上它的名字，让当前宠物明白那不是自己说的，
+    /// 从而用自己的性格接续、而不是模仿上一只的语气。
+    private func llmHistory(activePetID: String) -> [LLMMessage] {
+        entries.map { entry in
+            guard entry.message.role == .assistant,
+                  let pid = entry.petID, pid != activePetID else {
+                return entry.message
+            }
+            let name = petStore.roster.pets.first(where: { $0.id == pid })?.name ?? "另一只宠物"
+            return LLMMessage(role: .assistant, content: "（这句是「\(name)」说的）\(entry.message.content)")
+        }
+    }
+
+    /// 历史里是否有「别的宠物」说过的话 —— 有的话才需要给当前宠物加防串味提示。
+    private func hasForeignAssistant(activePetID: String) -> Bool {
+        entries.contains {
+            $0.message.role == .assistant && ($0.petID ?? activePetID) != activePetID
+        }
+    }
+
+    /// 切宠后防止性格 / 语气串味的系统提示，仅当历史里掺了别的宠物的话时才加。
+    private static func styleGuard(activeName: String, hasForeign: Bool) -> String {
+        guard hasForeign else { return "" }
+        return """
+
+
+【接手对话】这段记录里有些 assistant 回复来自别的宠物（已用「名字」标在句首）。你现在是「\(activeName)」，请先读懂前面的来龙去脉，然后只用你自己的性格、语气和说话风格自然接续，不要模仿别的宠物的腔调，也不要把自己错当成它们。
+"""
+    }
+
     func send() {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !sending else { return }
         let userMsg = LLMMessage(role: .user, content: trimmed)
-        messages.append(userMsg)
+        entries.append(ChatEntry(message: userMsg, petID: nil))
         input = ""
         streaming = ""
         sending = true
@@ -84,25 +140,30 @@ final class ChatModel: ObservableObject {
         state.noteInteraction()
         state.mood = .think     // 等回复期间在思考
 
-        let history = messages
-        let provider = SettingsView.makeProvider()
+        // 这一轮回复归属当前激活的宠物；历史里别的宠物的话会被标注出来。
+        let authorID = petStore.active.id
+        let authorName = petStore.active.name
         let basePersona = petStore.active.persona
+        let history = llmHistory(activePetID: authorID)
+        let provider = SettingsView.makeProvider()
         let persona = Persona(
             name: basePersona.name,
-            systemPrompt: basePersona.systemPrompt + Self.moodInstruction
+            systemPrompt: basePersona.systemPrompt
+                + Self.moodInstruction
+                + Self.styleGuard(activeName: authorName, hasForeign: hasForeignAssistant(activePetID: authorID))
         )
 
         // TTS 开着时，"边流边显示气泡 + 完整后才发声"会让文字早于语音 2-3 秒，体验拉跨。
         // 流式期间不更新桌宠气泡，等流完调 state.say() 让气泡和音频同时亮。
         // 聊天历史窗里仍然能看到 streaming，所以打字感不丢。
-        let ttsOn = SettingsView.makeTTSProvider() != nil
+        let ttsOn = SettingsView.makeTTSProvider(for: petStore.active) != nil
 
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 var raw = ""              // 累积原始流（含 tag）
                 var moodResolved = false   // tag 是否已经处理（找到或放弃）
-                var parsedMood: PetMood = .talk
+                var parsedMood: PetMood = .idle
                 for try await delta in provider.chat(persona: persona, history: history) {
                     raw += delta
                     if !moodResolved {
@@ -110,11 +171,11 @@ final class ChatModel: ObservableObject {
                         if !stripped.isEmpty, stripped.first != "[" {
                             // 不以 [ 开头，肯定不是 tag —— 直接吐字
                             moodResolved = true
-                            parsedMood = .talk
-                            if !ttsOn { self.state.mood = .talk }
+                            parsedMood = .idle
+                            if !ttsOn { self.state.mood = .idle }
                         } else if raw.contains("]") || raw.count > 30 {
                             let (mood, rest) = Self.extractMoodTag(raw)
-                            parsedMood = mood ?? .talk
+                            parsedMood = mood ?? .idle
                             raw = rest
                             moodResolved = true
                             if !ttsOn { self.state.mood = parsedMood }
@@ -137,7 +198,10 @@ final class ChatModel: ObservableObject {
                 }
                 let final = raw
                 if !final.isEmpty {
-                    self.messages.append(.init(role: .assistant, content: final))
+                    self.entries.append(ChatEntry(
+                        message: .init(role: .assistant, content: final),
+                        petID: authorID
+                    ))
                 }
                 self.streaming = ""
                 self.sending = false
@@ -146,7 +210,7 @@ final class ChatModel: ObservableObject {
             } catch {
                 self.sending = false
                 self.lastError = String(describing: error)
-                self.state.say("出错了：\(self.lastError ?? "未知")", mood: .confused)
+                self.state.say("出错了：\(self.lastError ?? "未知")", mood: .sad)
             }
         }
     }
@@ -164,7 +228,7 @@ struct ChatView: View {
     /// 由 AppDelegate 注入，跟桌宠下面的 InlineChatBar 共用同一份对话历史。
     @ObservedObject var model: ChatModel
 
-    /// 当前正在朗读哪条 assistant 消息（按 displayMessages 索引），nil = 没在念
+    /// 当前正在朗读哪条 assistant 消息（按 displayEntries 索引），nil = 没在念
     @State private var readingIndex: Int?
     @State private var ttsAlert: String?
 
@@ -180,24 +244,24 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(model.displayMessages.enumerated()), id: \.offset) { idx, msg in
+                        ForEach(Array(model.displayEntries.enumerated()), id: \.element.id) { idx, entry in
                             MessageBubble(
-                                message: msg,
-                                assetPrefix: petStore.active.assetPrefix,
-                                canRead: canRead(at: idx, message: msg),
+                                message: entry.message,
+                                assetPrefix: model.assetPrefix(forPetID: entry.petID),
+                                canRead: canRead(at: idx, message: entry.message),
                                 isReading: readingIndex == idx,
-                                onToggleRead: { toggleRead(at: idx, text: msg.content) }
+                                onToggleRead: { toggleRead(at: idx, text: entry.message.content) }
                             )
                             .id(idx)
                         }
                     }
                     .padding()
                 }
-                .onChange(of: model.displayMessages.count) { _, n in
+                .onChange(of: model.displayEntries.count) { _, n in
                     if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
                 }
                 .onChange(of: model.streaming) { _, _ in
-                    let n = model.displayMessages.count
+                    let n = model.displayEntries.count
                     if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
                 }
             }
@@ -259,7 +323,7 @@ struct ChatView: View {
     /// 只有"已经成型的 assistant 回复"能朗读 —— 排除用户消息和正在 streaming 的临时尾巴。
     private func canRead(at idx: Int, message: LLMMessage) -> Bool {
         guard message.role == .assistant else { return false }
-        let isStreamingTail = !model.streaming.isEmpty && idx == model.displayMessages.count - 1
+        let isStreamingTail = !model.streaming.isEmpty && idx == model.displayEntries.count - 1
         return !isStreamingTail
     }
 
@@ -268,7 +332,7 @@ struct ChatView: View {
             voice.cancel()        // 让 state.say 的 onFinish(false) 把 readingIndex 收回
             return
         }
-        guard SettingsView.makeTTSProvider() != nil else {
+        guard SettingsView.makeTTSProvider(for: petStore.active) != nil else {
             ttsAlert = "请先到 设置 → 语音 打开「说话时念出来」并选好 TTS 后端（ElevenLabs 或本地 Bert-VITS2）。"
             return
         }
@@ -335,8 +399,13 @@ private struct MessageBubble: View {
         .overlay(Circle().stroke(.secondary.opacity(0.2), lineWidth: 0.5))
     }
 
-    /// 用静态首帧做头像（不让小 GIF 一直动，列表里太分散注意力）
+    /// 用静态首帧做头像（不让小 GIF 一直动，列表里太分散注意力）。
+    /// 先看用户给这只宠物导入的 idle 图，再退 bundle 内置，最后退全局 pet。
     private var avatarImage: NSImage? {
+        if let url = PetSprites.customSpriteURL(prefix: assetPrefix, mood: "idle"),
+           let img = NSImage(contentsOf: url) {
+            return img
+        }
         for name in ["\(assetPrefix)-idle", "pet-idle"] {
             if let url = Bundle.main.url(forResource: name, withExtension: "gif"),
                let img = NSImage(contentsOf: url) {

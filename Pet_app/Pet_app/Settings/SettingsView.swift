@@ -17,11 +17,13 @@ enum LLMBackend: String, CaseIterable {
 }
 
 enum TTSBackend: String, CaseIterable {
+    case hybridTaffy = "hybrid_taffy"        // 中文本地 Bert-VITS2 Taffy，英文 ElevenLabs Taffy
     case elevenlabs = "elevenlabs"
     case bertVITS2Local = "bertvits2_local"  // 本地跑 Bert-VITS2，xzjosh 的 Taffy 音色
 
     var label: String {
         switch self {
+        case .hybridTaffy: "混合塔菲（中文本地 / 英文 ElevenLabs）"
         case .elevenlabs: "ElevenLabs（云端）"
         case .bertVITS2Local: "本地 Bert-VITS2 Taffy"
         }
@@ -62,7 +64,16 @@ enum SettingsKeys {
     static let ttsSimilarity = "tts.elevenlabs.similarity"
 }
 
+private let defaultTTSEnabled = true
+
 struct SettingsView: View {
+    static func isTTSEnabled(_ defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: SettingsKeys.ttsEnabled) != nil else {
+            return defaultTTSEnabled
+        }
+        return defaults.bool(forKey: SettingsKeys.ttsEnabled)
+    }
+
     @ObservedObject var petStore: PetStore
 
     @AppStorage(SettingsKeys.backend) private var backend: String = LLMBackend.claude.rawValue
@@ -76,8 +87,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKeys.openaiBaseURL) private var openaiBase: String = "https://generativelanguage.googleapis.com/v1beta/openai/"
     @AppStorage(SettingsKeys.openaiModel) private var openaiModel: String = "gemini-2.5-flash"
 
-    @AppStorage(SettingsKeys.ttsEnabled) private var ttsEnabled: Bool = false
-    @AppStorage(SettingsKeys.ttsBackend) private var ttsBackend: String = TTSBackend.elevenlabs.rawValue
+    @AppStorage(SettingsKeys.ttsEnabled) private var ttsEnabled: Bool = defaultTTSEnabled
+    @AppStorage(SettingsKeys.ttsBackend) private var ttsBackend: String = TTSBackend.hybridTaffy.rawValue
     @AppStorage(SettingsKeys.ttsAPIKey) private var ttsKey: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.clientToken : ""
     @AppStorage(SettingsKeys.ttsBaseURL) private var ttsBase: String = ProxyConfig.prefillProxyOnFirstLaunch ? ProxyConfig.elevenlabsBaseURL : "https://api.elevenlabs.io"
     @AppStorage(SettingsKeys.ttsVoiceID) private var ttsVoiceID: String = ProxyConfig.defaultVoiceID
@@ -238,7 +249,7 @@ struct SettingsView: View {
                     set: { petStore.setActive(id: $0) }
                 )) {
                     ForEach(petStore.roster.pets, id: \.id) { p in
-                        Text("\(p.name)（\(p.id)）").tag(p.id)
+                        Text(p.name).tag(p.id)
                     }
                 }
                 Button(role: .destructive) {
@@ -252,9 +263,9 @@ struct SettingsView: View {
 
             // —— 新建一只全新的宠物（建完自动切过去）
             VStack(alignment: .leading, spacing: 4) {
-                Text("新建宠物").font(.caption).foregroundStyle(.secondary)
+                Text("新建一只宠物").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    TextField("名字（如 mochi）", text: $newPetName)
+                    TextField("新宠物的名字（如 mochi）", text: $newPetName)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit { createPet() }
                     Button("新建并切换") { createPet() }
@@ -267,9 +278,9 @@ struct SettingsView: View {
             Divider()
 
             // —— 以下都是在编辑「当前激活」的那只宠物
-            Text("编辑「\(petStore.active.name)」").font(.caption).foregroundStyle(.secondary)
+            Text("编辑当前宠物「\(petStore.active.name)」").font(.caption).foregroundStyle(.secondary)
 
-            TextField("名字", text: Binding(
+            TextField("重命名", text: Binding(
                 get: { petStore.active.name },
                 set: { v in petStore.updateActive { $0.name = v } }
             ))
@@ -280,9 +291,11 @@ struct SettingsView: View {
                 Text(petStore.active.assetPrefix)
                     .font(.system(.caption, design: .monospaced))
                 Spacer()
-                Text("内置 Assets 名：\(petStore.active.assetPrefix)-idle / -talk …（没有就用下面导入的）")
+                Text("内置 Assets 名：\(petStore.active.assetPrefix)-idle / -cheer …（没有就用下面导入的）")
                     .font(.caption2).foregroundStyle(.secondary)
             }
+
+            petVoicePicker
 
             spriteCustomizer
 
@@ -300,6 +313,33 @@ struct SettingsView: View {
             Text("档案文件：\(AppPaths.petsFile.path)")
                 .font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    /// 这只宠物用什么声音 —— 空串 = 跟随默认（塔菲混合、其它 ElevenLabs）。
+    /// ElevenLabs 的 key / voice id 等仍在「语音」标签页里共用配置。
+    @ViewBuilder
+    private var petVoicePicker: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Picker("声音", selection: Binding(
+                get: { petStore.active.voiceBackend ?? "" },
+                set: { v in
+                    petStore.updateActive { $0.voiceBackend = v.isEmpty ? nil : v }
+                    NotificationCenter.default.post(name: .ttsBackendChanged, object: nil)
+                }
+            )) {
+                Text("跟随默认").tag("")
+                Text(TTSBackend.hybridTaffy.label).tag(TTSBackend.hybridTaffy.rawValue)
+                Text(TTSBackend.elevenlabs.label).tag(TTSBackend.elevenlabs.rawValue)
+                Text(TTSBackend.bertVITS2Local.label).tag(TTSBackend.bertVITS2Local.rawValue)
+            }
+            Text("默认：永雏塔菲走「混合塔菲」（本地中文 + ElevenLabs 英文），其它宠物走 ElevenLabs（需在「语音」页填 key 与 voice id）。当前生效：\(currentVoiceLabel)")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var currentVoiceLabel: String {
+        TTSBackend(rawValue: petStore.active.resolvedVoiceBackend)?.label ?? petStore.active.resolvedVoiceBackend
     }
 
     /// 当前宠物的自定义形象区：逐状态选图 + 打开素材文件夹 + 刷新。
@@ -512,12 +552,28 @@ struct SettingsView: View {
                 NotificationCenter.default.post(name: .ttsBackendChanged, object: nil)
             }
 
-            if ttsBackend == TTSBackend.bertVITS2Local.rawValue {
+            if ttsBackend == TTSBackend.hybridTaffy.rawValue {
+                hybridTaffySection
+            } else if ttsBackend == TTSBackend.bertVITS2Local.rawValue {
                 localTTSSection
             } else {
                 elevenLabsSection
             }
         }
+    }
+
+    @ViewBuilder
+    private var hybridTaffySection: some View {
+        Text("中文默认走本地 Bert-VITS2 永雏塔菲；英文 / 拉丁字母片段走 ElevenLabs 里的塔菲 Voice ID。只有切到 ElevenLabs 或克隆新 voice id 时，才会全段使用云端音色。")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        localTTSSection
+
+        Divider()
+        Text("英文段 ElevenLabs 音色")
+            .font(.subheadline.weight(.medium))
+        elevenLabsSection
     }
 
     /// ElevenLabs（云端）面板 —— 老的字段都迁过来。
@@ -756,14 +812,52 @@ struct SettingsView: View {
     }
 
     /// 当 TTS 开关打开且对应 backend 配置齐全时返回 provider，否则 nil。
-    /// 在 backend 之间切换会自动走不同分支；两边的缓存因为 voiceKey 不同所以不会打架。
-    static func makeTTSProvider() -> (any TTSProvider)? {
+    /// 声音是「按宠物」的：传进来的 pet 决定走哪个后端 —— 塔菲走「混合塔菲」（本地中文 +
+    /// ElevenLabs 英文），其它宠物默认走 ElevenLabs（见 PetProfile.resolvedVoiceBackend）。
+    /// 不传 pet 时退回全局设置里的默认后端。两边缓存 voiceKey 不同所以不会打架。
+    static func makeTTSProvider(for pet: PetProfile? = nil) -> (any TTSProvider)? {
         let d = UserDefaults.standard
-        guard d.bool(forKey: SettingsKeys.ttsEnabled) else { return nil }
-        let backend = TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "")
-            ?? .elevenlabs
+        guard isTTSEnabled(d) else { return nil }
+        let backend: TTSBackend = {
+            if let raw = pet?.resolvedVoiceBackend, let b = TTSBackend(rawValue: raw) { return b }
+            return TTSBackend(rawValue: d.string(forKey: SettingsKeys.ttsBackend) ?? "") ?? .hybridTaffy
+        }()
 
         switch backend {
+        case .hybridTaffy:
+            let local = CachingTTSProvider(
+                inner: LocalBertVITS2TTS(),
+                cacheDir: AppPaths.ttsCacheDir,
+                voiceKey: "bert-vits2-taffy-zh-2.3"
+            )
+            let key = d.string(forKey: SettingsKeys.ttsAPIKey) ?? ""
+            let voice = d.string(forKey: SettingsKeys.ttsVoiceID) ?? ""
+            let cloud: (any TTSProvider)?
+            if !key.trimmingCharacters(in: .whitespaces).isEmpty,
+               !voice.trimmingCharacters(in: .whitespaces).isEmpty {
+                let baseURLString = d.string(forKey: SettingsKeys.ttsBaseURL) ?? "https://api.elevenlabs.io"
+                let baseURL = URL(string: baseURLString) ?? URL(string: "https://api.elevenlabs.io")!
+                let model = d.string(forKey: SettingsKeys.ttsModel) ?? "eleven_multilingual_v2"
+                let stability = (d.object(forKey: SettingsKeys.ttsStability) as? Double) ?? 0.5
+                let similarity = (d.object(forKey: SettingsKeys.ttsSimilarity) as? Double) ?? 0.75
+                let eleven = ElevenLabsTTS(
+                    apiKey: key,
+                    voiceID: voice,
+                    modelID: model,
+                    baseURL: baseURL,
+                    stability: stability,
+                    similarityBoost: similarity
+                )
+                cloud = CachingTTSProvider(
+                    inner: eleven,
+                    cacheDir: AppPaths.ttsCacheDir,
+                    voiceKey: "elevenlabs-taffy-en|\(baseURLString)|\(voice)|\(model)|s=\(stability)|b=\(similarity)"
+                )
+            } else {
+                cloud = nil
+            }
+            return HybridTaffyTTSProvider(localTaffy: local, elevenLabs: cloud)
+
         case .elevenlabs:
             let key = d.string(forKey: SettingsKeys.ttsAPIKey) ?? ""
             let voice = d.string(forKey: SettingsKeys.ttsVoiceID) ?? ""
@@ -801,4 +895,3 @@ struct SettingsView: View {
         }
     }
 }
-

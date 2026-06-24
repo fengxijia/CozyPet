@@ -10,19 +10,42 @@ public struct PetProfile: Codable, Identifiable, Sendable, Equatable {
     /// 找不到时回退到全局 "pet-<mood>"，再不行用 emoji。
     public var assetPrefix: String
     public var persona: Persona
+    /// 该宠物用的 TTS 后端（取值同 App 端 TTSBackend 的 rawValue：
+    /// `hybrid_taffy` / `elevenlabs` / `bertvits2_local`）。
+    /// nil = 按默认规则（见 `resolvedVoiceBackend`）：塔菲用混合塔菲，其它宠物用 ElevenLabs。
+    public var voiceBackend: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case name
         case assetPrefix = "asset_prefix"
         case persona
+        case voiceBackend = "voice_backend"
     }
 
-    public init(id: String, name: String, assetPrefix: String, persona: Persona) {
+    public init(
+        id: String,
+        name: String,
+        assetPrefix: String,
+        persona: Persona,
+        voiceBackend: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.assetPrefix = assetPrefix
         self.persona = persona
+        self.voiceBackend = voiceBackend
+    }
+
+    /// 实际生效的声音后端。显式设了就用；没设时：本地 Bert-VITS2 模型本身是「塔菲」音色，
+    /// 所以只有塔菲（id / 前缀 == taffy）默认用「混合塔菲」，其它宠物默认走 ElevenLabs，
+    /// 免得别的宠物都顶着塔菲的嗓子。
+    public var resolvedVoiceBackend: String {
+        if let v = voiceBackend, !v.trimmingCharacters(in: .whitespaces).isEmpty { return v }
+        if id.lowercased() == "taffy" || assetPrefix.lowercased() == "taffy" {
+            return "hybrid_taffy"
+        }
+        return "elevenlabs"
     }
 
     /// 把任意名字转成 id / 前缀友好的 slug：小写、保留 ASCII 字母数字和短横线

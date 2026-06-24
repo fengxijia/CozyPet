@@ -47,7 +47,7 @@ struct PetSpriteView: View {
                     },
                     onDoubleTap: { app.setDisplayMode(.mini) },
                     onPickMode: { app.setDisplayMode($0) },
-                    onSay: { state.say("嗨～", mood: .talk) },
+                    onSay: { state.say("嗨～", mood: .cheer) },
                     onCycleMood: { state.cycleMood() }
                 )
             }
@@ -75,7 +75,7 @@ struct PetSpriteView: View {
                 onTap: { state.noteInteraction() },
                 onDoubleTap: { app.setDisplayMode(.full) },
                 onPickMode: { app.setDisplayMode($0) },
-                onSay: { state.say("嗨～", mood: .talk) },
+                onSay: { state.say("嗨～", mood: .cheer) },
                 onCycleMood: { state.cycleMood() }
             )
         }
@@ -106,18 +106,15 @@ struct PetSpriteView: View {
 
     /// pickedSource 没命中时的回退链：
     /// 1. 当前宠物 + 当前 mood（用户图优先，其次 bundle）
-    /// 2. confused 借 think 的表情
-    /// 3. 当前宠物 + idle
-    /// 4. 全局 pet-<mood>
-    /// 5. 全局 pet-idle
+    /// 2. 当前宠物 + idle
+    /// 3. 全局 pet-<mood>
+    /// 4. 全局 pet-idle
     /// 全没就 emoji。
     private var fallbackCandidates: [SpriteSource] {
         let prefix = petStore.active.assetPrefix
         let mood = state.mood.rawValue
         var list: [SpriteSource] = []
         if let s = resolve(prefix: prefix, mood: mood) { list.append(s) }
-        // 困惑没有自己的图时，借 think（思考表情）而不是 idle —— 表情上更接近
-        if state.mood == .confused, let s = resolve(prefix: prefix, mood: "think") { list.append(s) }
         if let s = resolve(prefix: prefix, mood: "idle") { list.append(s) }
         if let s = resolve(prefix: "pet", mood: mood) { list.append(s) }
         if let s = resolve(prefix: "pet", mood: "idle") { list.append(s) }
@@ -171,11 +168,15 @@ struct PetSpriteView: View {
         Group {
             switch resolved {
             case .gif(let url):
+                // customLoopCount(0) = 强制无限循环，盖掉 GIF 内嵌的次数
+                // （有些导入的图只循环 1 次，播完就卡成静止帧，比如 sleep.gif）。
                 AnimatedImage(url: url)
+                    .customLoopCount(0)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             case .asset(let name):
                 AnimatedImage(name: name)
+                    .customLoopCount(0)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             case nil:
@@ -191,27 +192,21 @@ struct PetSpriteView: View {
     private var placeholder: String {
         switch state.mood {
         case .idle: "🐾"
-        case .talk: "💬"
         case .think: "🤔"
-        case .confused: "❓"
-        case .remind: "🔔"
         case .sad: "🥺"
         case .cheer: "✨"
         case .angry: "😡"
         case .love: "💗"
-        case .daze: "😶‍🌫️"
         case .sleep: "💤"
         }
     }
 
     private var scaleForMood: CGFloat {
         switch state.mood {
-        case .talk: 1.05
         case .cheer: 1.10
         case .sad: 0.95
         case .sleep: 0.92
         case .think: 0.9
-        case .confused: 1.0
         default: 1.0
         }
     }

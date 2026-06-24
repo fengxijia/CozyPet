@@ -28,7 +28,7 @@ final class VoicePlayer: ObservableObject {
                onReady: (@MainActor () -> Void)? = nil,
                onFinish: (@MainActor (Bool) -> Void)? = nil) {
         cancel()
-        let snapshot = text
+        let snapshot = Self.normalizeForSpeech(text)
         let chunks = Self.chunkForTTS(snapshot)
         guard !chunks.isEmpty else {
             onReady?()
@@ -57,14 +57,19 @@ final class VoicePlayer: ObservableObject {
             guard let self else {
                 fireReady(); fireFinish(false); return
             }
-            for (i, chunk) in chunks.enumerated() {
+            var startedAudio = false
+            for chunk in chunks {
                 if Task.isCancelled {
                     self.endSession()
                     fireReady(); fireFinish(false); return
                 }
-                let data: Data
+                let pieces: [Data]
                 do {
-                    data = try await provider.synthesize(chunk)
+                    if let segmented = provider as? any SegmentedTTSProvider {
+                        pieces = try await segmented.synthesizePieces(chunk)
+                    } else {
+                        pieces = [try await provider.synthesize(chunk)]
+                    }
                 } catch is CancellationError {
                     self.endSession()
                     fireReady(); fireFinish(false); return
@@ -79,19 +84,24 @@ final class VoicePlayer: ObservableObject {
                     self.endSession()
                     fireReady(); fireFinish(false); return
                 }
-                do {
-                    try self.startPlayback(data: data)
-                } catch {
-                    self.lastError = String(describing: error)
-                    self.endSession()
-                    fireReady(); fireFinish(false); return
-                }
-                if i == 0 { fireReady() }
-                await self.waitForPlaybackEnd()
-                // 走到这里：要么自然播完，要么 cancel() 把 player.stop() 调了。
-                if Task.isCancelled {
-                    self.endSession()
-                    fireFinish(false); return
+                for data in pieces {
+                    do {
+                        try self.startPlayback(data: data)
+                    } catch {
+                        self.lastError = String(describing: error)
+                        self.endSession()
+                        fireReady(); fireFinish(false); return
+                    }
+                    if !startedAudio {
+                        startedAudio = true
+                        fireReady()
+                    }
+                    await self.waitForPlaybackEnd()
+                    // 走到这里：要么自然播完，要么 cancel() 把 player.stop() 调了。
+                    if Task.isCancelled {
+                        self.endSession()
+                        fireFinish(false); return
+                    }
                 }
             }
             self.lastError = nil
@@ -148,6 +158,56 @@ final class VoicePlayer: ObservableObject {
             }
             pendingPlaybackContinuation = cont
         }
+    }
+
+    /// 合成前的文本规整。目前只做一件事：把列表编号「1. / 2) / 3、」转成中文「一、二、三、」，
+    /// 否则 Bert-VITS2 的语种分割会把「1.」判成英文、读成 "one"。
+    /// 只动「真·列表编号」：数字前是行首 / 空白 / 中文冒号顿号括号，数字后是 .、) 之一，
+    /// 且分隔符后面不是数字 —— 这样「2.5」「v2.3」「gpt-4」「100」都不会被误伤。
+    static func normalizeForSpeech(_ text: String) -> String {
+        let chars = Array(text)
+        var out = ""
+        out.reserveCapacity(text.count)
+        var i = 0
+        let boundaryBefore: Set<Character> = [" ", "\t", "\n", "：", ":", "，", ",", "、", "(", "（", "．"]
+        let seps: Set<Character> = [".", "．", "、", ")", "）"]
+        func isDigit(_ c: Character) -> Bool { c >= "0" && c <= "9" }
+
+        while i < chars.count {
+            // 试着在位置 i 匹配「(边界) 1~2 位数字 + 分隔符 + (空白/中文/结尾)」
+            let atBoundary = (i == 0) || boundaryBefore.contains(chars[i - 1])
+            if atBoundary, isDigit(chars[i]) {
+                var j = i
+                while j < chars.count, isDigit(chars[j]), j - i < 2 { j += 1 }  // 最多 2 位
+                if j < chars.count, seps.contains(chars[j]), !(j == i) {
+                    let afterSep = j + 1 < chars.count ? chars[j + 1] : " "
+                    // 分隔符后是数字 → 是小数/版本号，不动
+                    if !isDigit(afterSep) {
+                        let n = Int(String(chars[i..<j])) ?? -1
+                        if n >= 0, let cn = Self.chineseNumber(n) {
+                            out += cn + "、"
+                            i = j + 1
+                            // 吃掉分隔符后的一个空格，免得「一、 写」中间多空格
+                            if i < chars.count, chars[i] == " " { i += 1 }
+                            continue
+                        }
+                    }
+                }
+            }
+            out.append(chars[i])
+            i += 1
+        }
+        return out
+    }
+
+    /// 0–99 的阿拉伯数字转中文（列表编号够用）。超范围返回 nil（不转，保持原样）。
+    static func chineseNumber(_ n: Int) -> String? {
+        guard (0...99).contains(n) else { return nil }
+        let d = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+        if n < 10 { return d[n] }
+        if n < 20 { return "十" + (n % 10 == 0 ? "" : d[n % 10]) }
+        let t = n / 10, o = n % 10
+        return d[t] + "十" + (o == 0 ? "" : d[o])
     }
 
     /// 把长文本按句号 / 感叹号 / 问号 / 换行切片，每片不超过 maxLen。

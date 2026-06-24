@@ -62,7 +62,7 @@ python -m pip install --upgrade pip wheel
 if [[ -d Bert-VITS2 ]]; then
     EXISTING_REMOTE="$(cd Bert-VITS2 && git config --get remote.origin.url 2>/dev/null || true)"
     if [[ "$EXISTING_REMOTE" != *modelscope.cn* ]]; then
-        echo "==> 检测到旧版 Bert-VITS2（remote=$EXISTING_REMOTE），删掉重来"
+        echo "==> 检测到旧版 Bert-VITS2（remote=${EXISTING_REMOTE}），删掉重来"
         rm -rf Bert-VITS2
     fi
 fi
@@ -93,6 +93,13 @@ if [[ -f Bert-VITS2/requirements.txt ]]; then
     grep -v -i 'wetextprocessing' Bert-VITS2/requirements.txt > /tmp/bertvits2-reqs.txt
     pip install -r /tmp/bertvits2-reqs.txt
 fi
+
+# studio requirements 里的 vector_quantize_pytorch 会声明 torch>=2.4，
+# pip 可能因此把上面的 2.2.2 升掉；Bert-VITS2 这套在本项目里 pin 回 2.2.2。
+echo "==> 重新 pin torch / torchaudio"
+pip install \
+    "torch==2.2.2" \
+    "torchaudio==2.2.2"
 
 # 6. server 这一层额外的依赖（FastAPI + ffmpeg-python 用来 encode mp3）
 echo "==> 安装 server 额外依赖"

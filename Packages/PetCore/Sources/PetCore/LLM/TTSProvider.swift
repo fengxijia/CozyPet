@@ -6,6 +6,11 @@ public protocol TTSProvider: Sendable {
     func synthesize(_ text: String) async throws -> Data
 }
 
+public protocol SegmentedTTSProvider: TTSProvider {
+    /// 把一段文本合成成多个可顺序播放的音频片段。
+    func synthesizePieces(_ text: String) async throws -> [Data]
+}
+
 /// 给任意 TTSProvider 套一层磁盘缓存：相同输入（text + voiceKey）直接读 mp3 文件，
 /// 不重新跑一次 ElevenLabs 请求。voiceKey 应该把 voice id / model / 风格参数都拼进去，
 /// 否则换音色后会拿到旧缓存。

@@ -139,6 +139,44 @@ final class WorkflowStore: ObservableObject {
         persist()
     }
 
+    // MARK: - 归档
+
+    /// 今日实际要做 / 要念 / 要计进度的步骤（未归档）。
+    var activeSteps: [WorkflowStep] {
+        workflow?.steps.filter { !$0.isArchived } ?? []
+    }
+
+    /// 收进归档、暂时不显示的步骤。
+    var archivedSteps: [WorkflowStep] {
+        workflow?.steps.filter { $0.isArchived } ?? []
+    }
+
+    /// 归档 / 提回今日。归档时同时把它从「今日已完成」里摘掉，避免计数错乱。
+    func setArchived(id: String, _ archived: Bool) {
+        guard var wf = workflow,
+              let idx = wf.steps.firstIndex(where: { $0.id == id }) else { return }
+        wf.steps[idx].archived = archived ? true : nil
+        workflow = wf
+        if archived, doneIDs.contains(id) {
+            doneIDs.remove(id)
+            UserDefaults.standard.set(Array(doneIDs), forKey: doneKey)
+        }
+        persist()
+    }
+
+    /// List 只展示未归档步骤，拖动给的 offset 是「活跃子集」里的下标 ——
+    /// 先在活跃子集内重排，再把归档项接到后面写回，保证下标不串味。
+    func moveActiveSteps(from offsets: IndexSet, to destination: Int) {
+        guard let wf = workflow else { return }
+        var active = wf.steps.filter { !$0.isArchived }
+        let archived = wf.steps.filter { $0.isArchived }
+        active.move(fromOffsets: offsets, toOffset: destination)
+        var next = wf
+        next.steps = active + archived
+        workflow = next
+        persist()
+    }
+
     /// 检查给定 id 在当前 workflow 里是否已存在（排除 excluding 自己用于编辑场景）。
     func idExists(_ id: String, excluding: String? = nil) -> Bool {
         guard let wf = workflow else { return false }
@@ -174,6 +212,8 @@ struct WorkflowPanel: View {
     @State private var ttsAlert: String?
     /// 底部区域当前显示的标签 —— 爱心便签 / 保险箱，左对齐切换。
     @State private var bottomTab: BottomTab = .notes
+    /// 归档区是否展开。默认收起，不抢今日列表的位置。
+    @State private var archivedExpanded: Bool = false
 
     private enum BottomTab: Hashable {
         case notes, vault
@@ -202,42 +242,92 @@ struct WorkflowPanel: View {
         } message: {
             Text(ttsAlert ?? "")
         }
-        // 增 / 删 / 调顺序后从头读，下标可能错位。改文字不重置，保持续读体验。
-        .onChange(of: store.workflow?.steps.map(\.id) ?? []) { _, _ in
+        // 增 / 删 / 调顺序 / 归档后从头读，下标可能错位。改文字不重置，保持续读体验。
+        .onChange(of: store.activeSteps.map(\.id)) { _, _ in
             currentStepIndex = 0
         }
     }
 
     private var hasSpeakableSteps: Bool {
-        guard let wf = store.workflow else { return false }
-        return wf.steps.contains { ($0.say ?? "").trimmingCharacters(in: .whitespaces).isEmpty == false }
+        store.activeSteps.contains { ($0.say ?? "").trimmingCharacters(in: .whitespaces).isEmpty == false }
     }
 
     @ViewBuilder
     private var stepsArea: some View {
-        if let wf = store.workflow, !wf.steps.isEmpty {
-            List {
-                ForEach(wf.steps) { step in
-                    StepRow(
-                        step: step,
-                        done: store.doneIDs.contains(step.id),
-                        onRun: { run(step) },
-                        onToggle: { store.toggle(step.id) },
-                        onEdit: { editorWindow.show(mode: .edit(original: step), store: store) },
-                        onDelete: { store.deleteStep(id: step.id) }
-                    )
+        if store.workflow != nil {
+            VStack(spacing: 0) {
+                if store.activeSteps.isEmpty {
+                    if store.archivedSteps.isEmpty {
+                        emptyHint
+                    } else {
+                        // 全归档了：上面给个轻提示，归档区照常在底部展开
+                        Text("今日没有进行中的步骤 —— 可从下面「归档」提回，或新建")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding()
+                    }
+                } else {
+                    List {
+                        ForEach(store.activeSteps) { step in
+                            StepRow(
+                                step: step,
+                                done: store.doneIDs.contains(step.id),
+                                onRun: { run(step) },
+                                onToggle: { store.toggle(step.id) },
+                                onEdit: { editorWindow.show(mode: .edit(original: step), store: store) },
+                                onArchive: { store.setArchived(id: step.id, true) },
+                                onDelete: { store.deleteStep(id: step.id) }
+                            )
+                        }
+                        .onMove { offsets, dest in
+                            store.moveActiveSteps(from: offsets, to: dest)
+                        }
+                    }
+                    .listStyle(.plain)
                 }
-                .onMove { offsets, dest in
-                    store.moveSteps(from: offsets, to: dest)
-                }
+                archivedSection
             }
-            .listStyle(.plain)
         } else if let err = store.lastError {
             ScrollView { Text(err).padding() }
-        } else if store.workflow != nil {
-            emptyHint
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// 底部归档区：折叠收纳暂时不需要的步骤，可一键「提回今日」或删除。
+    @ViewBuilder
+    private var archivedSection: some View {
+        let archived = store.archivedSteps
+        if !archived.isEmpty {
+            DisclosureGroup(isExpanded: $archivedExpanded) {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(archived) { step in
+                            ArchivedRow(
+                                step: step,
+                                onRestore: { store.setArchived(id: step.id, false) },
+                                onDelete: { store.deleteStep(id: step.id) }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 160)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "archivebox")
+                        .foregroundStyle(.secondary)
+                    Text("归档")
+                        .font(.subheadline.weight(.medium))
+                    Text("\(archived.count)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.quaternary.opacity(0.25))
         }
     }
 
@@ -284,8 +374,9 @@ struct WorkflowPanel: View {
             VStack(alignment: .leading) {
                 Text(store.workflow?.name ?? "今日工作流")
                     .font(.title3.weight(.semibold))
-                if let wf = store.workflow {
-                    Text("\(store.doneIDs.intersection(Set(wf.steps.map(\.id))).count) / \(wf.steps.count) 已完成")
+                if store.workflow != nil {
+                    let active = store.activeSteps
+                    Text("\(store.doneIDs.intersection(Set(active.map(\.id))).count) / \(active.count) 已完成")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -354,7 +445,7 @@ struct WorkflowPanel: View {
         let say = step.say ?? "开始下一步"
         let ok = WorkflowRunner.run(step)
         if !ok {
-            state.say("没打开成功，检查一下 bundle id / URL", mood: .confused)
+            state.say("没打开成功，检查一下 bundle id / URL", mood: .sad)
             return
         }
         state.say(say, mood: .cheer)
@@ -369,18 +460,20 @@ struct WorkflowPanel: View {
             voice.cancel()
             return
         }
-        guard SettingsView.makeTTSProvider() != nil else {
-            ttsAlert = "请先到 设置 → 语音 打开「说话时念出来」并填好 ElevenLabs key + Voice ID。"
+        guard state.canSpeak else {
+            ttsAlert = "当前宠物现在没有可用的语音。到 设置 → 语音 打开「说话时念出来」；走 ElevenLabs 的宠物还要填好 key + Voice ID。"
             return
         }
-        guard let steps = store.workflow?.steps, !steps.isEmpty else { return }
+        let steps = store.activeSteps
+        guard !steps.isEmpty else { return }
         if currentStepIndex >= steps.count { currentStepIndex = 0 }
         isReadingSteps = true
         playStep(at: currentStepIndex)
     }
 
     private func playStep(at idx: Int) {
-        guard let steps = store.workflow?.steps, idx < steps.count else {
+        let steps = store.activeSteps
+        guard idx < steps.count else {
             currentStepIndex = 0
             isReadingSteps = false
             return
@@ -407,6 +500,7 @@ private struct StepRow: View {
     let onRun: () -> Void
     let onToggle: () -> Void
     let onEdit: () -> Void
+    let onArchive: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -444,6 +538,17 @@ private struct StepRow: View {
                 .foregroundStyle(.secondary.opacity(0.5))
                 .frame(maxHeight: .infinity, alignment: .center)
                 .help("拖动调整顺序")
+
+            Button {
+                onArchive()
+            } label: {
+                Image(systemName: "archivebox")
+                    .font(.caption)
+                    .foregroundStyle(.secondary.opacity(0.6))
+            }
+            .buttonStyle(.borderless)
+            .frame(maxHeight: .infinity, alignment: .center)
+            .help("归档（暂时收起，以后可提回今日）")
 
             Button {
                 onDelete()
@@ -488,6 +593,46 @@ private struct StepRow: View {
         case .path: return a.openPath.map { "path: \($0)" }
         case .prompt: return "提醒"
         }
+    }
+}
+
+/// 归档区里的一行：灰一点、不可勾选 / 不可启动，只能「提回今日」或删除。
+private struct ArchivedRow: View {
+    let step: WorkflowStep
+    let onRestore: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "archivebox.fill")
+                .font(.caption2)
+                .foregroundStyle(.secondary.opacity(0.5))
+            Text(step.say ?? step.id)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Button {
+                onRestore()
+            } label: {
+                Label("提回今日", systemImage: "tray.and.arrow.up")
+                    .font(.caption2)
+            }
+            .controlSize(.small)
+            .help("放回今日工作流")
+            Button {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary.opacity(0.6))
+            }
+            .buttonStyle(.borderless)
+            .help("彻底删除")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
     }
 }
 
@@ -1113,8 +1258,8 @@ private struct NotesPanel: View {
             voice.cancel()
             return
         }
-        guard SettingsView.makeTTSProvider() != nil else {
-            ttsAlert = "请先到 设置 → 语音 打开「说话时念出来」并填好 ElevenLabs key + Voice ID。"
+        guard state.canSpeak else {
+            ttsAlert = "当前宠物现在没有可用的语音。到 设置 → 语音 打开「说话时念出来」；走 ElevenLabs 的宠物还要填好 key + Voice ID。"
             return
         }
         if currentIndex >= store.notes.count { currentIndex = 0 }
